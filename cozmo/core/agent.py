@@ -3,16 +3,26 @@ from .llm import OllamaModel
 from ..tools import TOOL_REGISTRY
 
 
+SPECIALIST_PROMPTS = {
+    "chat": "You are Cozmo, a friendly AI assistant. Be concise and helpful.",
+    "coder": "You are Cozmo, an expert programmer. Write clean, working code with brief explanations.",
+    "vision": "You are Cozmo, an AI that analyzes images and screenshots. Describe what you see clearly.",
+    "research": "You are Cozmo, a research analyst. Provide thorough, well-structured answers with sources.",
+}
+
+
 class Agent:
-    def __init__(self, model_name: str, base_url: str = "http://localhost:11434"):
+    def __init__(self, model_name: str, task_type: str = "chat", base_url: str = "http://localhost:11434"):
         self.llm = OllamaModel(model_name, base_url)
         self.tools = TOOL_REGISTRY
+        self.system_prompt = SPECIALIST_PROMPTS.get(task_type, SPECIALIST_PROMPTS["chat"])
 
     def _tool_help(self) -> str:
         lines = []
         for name, fn in self.tools.items():
             sig = f"{name}({', '.join(fn.__code__.co_varnames[:fn.__code__.co_argcount])})"
-            lines.append(f"- {sig}: {fn.__doc__ or 'no description'}")
+            doc = (fn.__doc__ or "no description").split(".")[0]
+            lines.append(f"- {sig}: {doc}")
         return "\n".join(lines)
 
     def _run_tool(self, text: str) -> tuple[str, str | None]:
@@ -39,7 +49,7 @@ class Agent:
     def run(self, prompt: str) -> str:
         tool_help = self._tool_help()
         system = (
-            "You are Cozmo, a helpful AI assistant with access to tools.\n"
+            f"{self.system_prompt}\n\n"
             f"Available tools:\n{tool_help}\n\n"
             "To use a tool, respond with:\n"
             "TOOL: tool_name(arg=value, arg2=value)\n\n"
@@ -59,15 +69,3 @@ class Agent:
         )
         final = self.llm.invoke(followup, system_prompt=system)
         return final
-
-    def interactive(self, initial_query: str | None = None):
-        if initial_query:
-            print(f"\nCozmo: {self.run(initial_query)}\n")
-        while True:
-            try:
-                user = input("\nYou: ")
-                if user.lower() in ("exit", "quit"):
-                    break
-                print(f"Cozmo: {self.run(user)}")
-            except (EOFError, KeyboardInterrupt):
-                break

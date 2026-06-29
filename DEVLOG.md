@@ -114,6 +114,30 @@ _Chronological development notes. Each entry = date + what changed + why + decis
 
 ---
 
-### YYYY-MM-DD — Phase 3: Memory + Telegram
+### 2026-06-29 — Specialist model routing refactor
 
-_(TBD)_
+**Changed model tier system (fast/balanced/heavy) to task-specific specialists**:
+
+| Old | New | Model |
+|-----|-----|-------|
+| fast | chat | phi4-mini:3.8b |
+| balanced | research | qwen3:8b |
+| heavy | coder | ornith:9b |
+| — | vision (new) | qwen2.5vl:7b |
+| classifier | classifier | qwen3:0.6b |
+
+**Files changed**:
+- `config.py` — replaced `fast`/`balanced`/`heavy` with `chat`/`coder`/`vision`/`research` + `classifier`
+- `core/orchestrator.py` — `_classify()` now outputs `chat|coder|vision|research`. Heuristic pre-filter extended with vision keyword matching. `_get_model_name()` maps task type directly.
+- `core/agent.py` — added `SPECIALIST_PROMPTS dict` with tailored system prompts per task type. Agent accepts `task_type` param, applies specialist prompt.
+- `tools/desktop.py` — `screenshot()` now auto-analyzes via vision model (qwen2.5vl:7b) using Ollama API. Added `analyze_image(path, prompt)` tool. Both return text descriptions, not raw image data.
+
+**New models pulled**: `ornith:9b` (5.6GB), `qwen2.5vl:7b` (6.0GB)
+
+**Design rationale**: paid agents (Claude Code, Cursor) use task-specific models. Cozmo mirrors this locally — each specialist trained/optimized for its domain. Vision analysis happens server-side within the tool, so any agent can describe images without needing multimodal capability itself.
+
+**Verified**:
+- "hello" → heuristic chat → phi4-mini ✅
+- "write palindrome function" → heuristic coder (regex) → ornith:9b ✅
+- Coding output: clean, working Python with explanation ✅
+- Config regenerated with all 5 model keys ✅

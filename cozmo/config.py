@@ -7,10 +7,11 @@ CONFIG_PATH = CONFIG_DIR / "config.toml"
 
 DEFAULT_CONFIG = {
     "models": {
-        "fast": "phi4-mini:3.8b",
-        "balanced": "qwen3:8b",
-        "heavy": "qwen2.5-coder:14b",
         "classifier": "qwen3:0.6b",
+        "chat": "phi4-mini:3.8b",
+        "coder": "ornith:9b",
+        "vision": "qwen2.5vl:7b",
+        "research": "qwen3:8b",
     },
     "ollama": {"url": "http://localhost:11434"},
     "memory": {"max_turns_before_summary": 5, "max_short_term_pairs": 10},

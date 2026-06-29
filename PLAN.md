@@ -1,93 +1,82 @@
 # Cozmo — Local AI Agent
 
-**Goal**: Fully local AI agent that runs on-device via Ollama. Orchestrator pattern routes tasks to appropriate models. Vector DB memory. Tool-use for desktop, web, messaging. Pip-installable, configurable for any hardware.
+**Goal**: Fully local AI agent that runs on-device via Ollama. Specialist model routing by task type. Vector DB memory. Tool-use for desktop, web, messaging. Pip-installable, configurable for any hardware.
 
 ## Architecture
 
 ```
-CLI Interface
-     │
-Orchestrator (Core)
-  ├── Router → classifies task complexity
-  ├── Agent → ReAct loop (langchain-wrapped)
-  └── Tool Exec → dispatches tool calls
-     │
-Model Registry (Ollama)
-  ├── Fast   (phi3:3.8b)      — simple Q&A, email, summarization
-  ├── Balanced (qwen3:8b)     — general reasoning, RAG
-  └── Heavy  (qwen3:32b)      — coding, complex analysis
-     │
-Memory Layer (ChromaDB)
-  ├── Working   — last N turns in-memory
-  ├── Episodic  — past sessions + user preferences
-  ├── Semantic  — documents + knowledge base (RAG)
-  └── Procedural — tool usage patterns
-     │
-Tools Layer
-  ├── calculator  — math evaluation
-  ├── file_ops    — read/write/search files
-  ├── web_search  — DuckDuckGo
-  ├── desktop     — screenshot, clipboard (read-only Phase 1-3)
-  ├── telegram    — bidirectional messaging
-  ├── email       — IMAP/SMTP
-  ├── browser     — playwright/selenium
-  ├── code_exec   — sandboxed Python (Phase 4+)
-  └── calendar    — local calendar
+User → CLI / Telegram
+         │
+    Orchestrator
+     ├── Heuristic pre-filter (0ms)
+     ├── LLM classifier (qwen3:0.6b) → chat | coder | vision | research
+     └── Router → picks specialist model
+                    │
+              Agent (specialist)
+               ├── Specialist system prompt
+               ├── Tool registry (all tools available)
+               └── Memory (ChromaDB query + update)
 ```
+
+## Model Registry
+
+| Task     | Model            | Size   | Role |
+|----------|-----------------|--------|------|
+| classifier | qwen3:0.6b    | 522MB  | Routes tasks to correct specialist |
+| chat     | phi4-mini:3.8b | 2.5GB  | General conversation, quick answers |
+| coder    | ornith:9b      | 6.5GB | Coding, debugging, scripts |
+| vision   | qwen2.5-vl:7b  | ~5GB   | Screenshot/image analysis |
+| research | qwen3:8b       | 5.2GB  | Web search, deep analysis, summaries |
 
 ## Directory Structure
 
 ```
 cozmo/
 ├── __init__.py
-├── cli.py              # CLI entry: cozmo run, cozmo init
-├── config.py           # TOML loader (tomllib), ~/.cozmo/config.toml
+├── cli.py
+├── config.py
+├── telegram_bot.py
 ├── core/
-│   ├── agent.py        # ReAct agent loop (langchain-wrapped)
-│   ├── llm.py          # Ollama wrapper, model registry
-│   ├── orchestrator.py # Task classifier → model router
-│   └── session.py      # Per-session state management
+│   ├── agent.py         # specialist prompts + tool execution loop
+│   ├── llm.py           # Ollama wrapper
+│   └── orchestrator.py  # classifier + router + memory injection
 ├── tools/
-│   ├── __init__.py     # Tool registry (decorator-based)
+│   ├── __init__.py      # tool registry + decorator
 │   ├── calculator.py
 │   ├── file_ops.py
 │   ├── web_search.py
-│   ├── desktop.py
+│   ├── desktop.py       # screenshot (with vision), clipboard
 │   └── telegram.py
 ├── memory/
 │   ├── __init__.py
-│   ├── manager.py      # working buffer + Chroma semantic
-│   └── chroma_store.py # wraps existing RAG code
-├── data/               # user documents (gitignored)
-└── chroma_db/          # vector store (gitignored)
+│   ├── manager.py
+│   └── chroma_store.py
 ```
 
 ## Phases
 
 ### Phase 1 — Core
-- Refactor into package structure
-- `cozmo init` generates `~/.cozmo/config.toml`
-- Model registry: fast / balanced / heavy
-- CLI: `cozmo run` (interactive), `cozmo init`
-- Tool registry pattern (decorator)
-- Tools: calculator, file_ops (read-only)
+- Package structure, pyproject.toml, pip-installable
+- CLI: `cozmo init`, `cozmo run`
+- Tool registry, calculator, file_ops
 
 ### Phase 2 — Orchestrator
-- Task classifier (heuristic: length + keyword)
-- Model routing per task type
-- Session context window management
-- Fallback chain: fast → balanced → heavy
+- Heuristic + LLM classifier
+- Task routing to specialist models
+- Conversation history
 
-### Phase 3 — Memory + Messenger
-- MemoryManager: working buffer (in-memory) + Chroma semantic
-- Memory summarization for long sessions
-- Telegram tool — bidirectional (push + pull)
-- web_search tool
-- desktop tool — screenshot + clipboard (read-only)
-- Ship-ready: `pip install cozmo` works
+### Phase 3 — Memory + Tools
+- ChromaDB memory with auto-summarization
+- web_search, desktop (screenshot + clipboard), Telegram
+- Cozmo Telegram bot
 
-### Phase 4+ — Advanced (separate milestones)
-- Discord plugin
+### Phase 4 — Specialist Agents (up next)
+- Vision: screenshot analysis via qwen2.5-vl:7b
+- Coder: ornith:9b for agentic coding
+- Research: qwen3:8b for deep analysis
+
+### Phase 5+ — Advanced
 - Full desktop control (pyautogui)
-- Sub-agents (coding, research, automation)
+- Obsidian vault indexing (graph + vector hybrid)
 - Hardware auto-detect → model recommendations
+- CI/CD, PyPI publishing

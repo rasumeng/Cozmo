@@ -11,18 +11,21 @@ _GREETINGS = {"hi", "hello", "hey", "sup", "yo", "what's up", "howdy"}
 def _pre_filter(text: str) -> str | None:
     t = text.strip().lower()
     if t in _GREETINGS or len(t) < 10:
-        return "simple"
-    if len(t) > 500:
-        return "complex"
+        return "chat"
     if re.search(r"```|def |class |import |async def|from \w+ import", t):
-        return "complex"
+        return "coder"
+    if re.search(r"screenshot|image|picture|what.*see|describe.*(screen|image)|look at", t):
+        return "vision"
+    if len(t) > 500:
+        return "research"
     return None
 
 
-_CLASSIFIER_PROMPT = """You are a task router. Classify the request as exactly one word:
-simple: chat, greetings, quick facts, yes/no
-moderate: explanations, research, analysis, summaries
-complex: coding, debugging, scripts, multi-step projects
+_CLASSIFIER_PROMPT = """Classify the user request as exactly one word:
+- chat: greetings, small talk, quick facts, general Q&A, simple tasks
+- coder: coding, debugging, scripts, programming, technical implementation
+- vision: analyzing images, describing screenshots, visual questions
+- research: deep analysis, explanations, comparisons, web search, learning
 
 Request: {text}
 Classification:"""
@@ -46,13 +49,12 @@ class Orchestrator:
             return result
 
         raw = self.classifier.invoke(_CLASSIFIER_PROMPT.format(text=text)).strip().lower()
-        if raw in ("simple", "moderate", "complex"):
+        if raw in ("chat", "coder", "vision", "research"):
             return raw
-        return "moderate"
+        return "chat"
 
     def _get_model_name(self, task_type: str) -> str:
-        m = {"simple": "fast", "moderate": "balanced", "complex": "heavy"}
-        return self.cfg["models"].get(m[task_type], "qwen3:8b")
+        return self.cfg["models"].get(task_type, "qwen3:8b")
 
     def _build_prompt(self, user_input: str, memories: str = "") -> str:
         parts = []
@@ -75,7 +77,7 @@ class Orchestrator:
         memories = self.memory.query(user_input)
         prompt = self._build_prompt(user_input, memories)
 
-        agent = Agent(model_name)
+        agent = Agent(model_name, task_type=task_type)
         result = agent.run(prompt)
 
         self.memory.add_interaction(user_input, result)
