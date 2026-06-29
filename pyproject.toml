@@ -13,7 +13,13 @@ dependencies = [
     "chromadb",
     "tomli-w",
     "python-dotenv",
+    "ddgs",
+    "pyperclip",
+    "Pillow",
 ]
+
+[project.optional-dependencies]
+telegram = ["python-telegram-bot>=21.0"]
 
 [tool.setuptools.packages.find]
 include = ["cozmo*"]

@@ -6,3 +6,5 @@ def register_tool(name=None):
         TOOL_REGISTRY[key] = func
         return func
     return decorator
+
+from . import calculator, file_ops, web_search, desktop, telegram

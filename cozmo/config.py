@@ -7,12 +7,15 @@ CONFIG_PATH = CONFIG_DIR / "config.toml"
 
 DEFAULT_CONFIG = {
     "models": {
-        "fast": "phi3:3.8b",
+        "fast": "phi4-mini:3.8b",
         "balanced": "qwen3:8b",
-        "heavy": "qwen3:32b",
+        "heavy": "qwen2.5-coder:14b",
+        "classifier": "qwen3:0.6b",
     },
     "ollama": {"url": "http://localhost:11434"},
-    "telegram": {"enabled": False},
+    "memory": {"max_turns_before_summary": 5, "max_short_term_pairs": 10},
+    "desktop": {"enabled": False},
+    "telegram": {"enabled": False, "bot_token": "", "allowed_chat_ids": []},
 }
 
 def load() -> dict:
