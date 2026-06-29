@@ -141,3 +141,36 @@ _Chronological development notes. Each entry = date + what changed + why + decis
 - "write palindrome function" → heuristic coder (regex) → ornith:9b ✅
 - Coding output: clean, working Python with explanation ✅
 - Config regenerated with all 5 model keys ✅
+
+---
+
+### 2026-06-29 — Phase 4 planning: Cozmo Code, Config CLI, Obsidian, WebUI
+
+**Planning session. No code changes.**
+
+**Decisions**:
+- `cozmo code` — separate subcommand, not a flag. Interactive coding session in CWD.
+- `code.allow_commands = false` by default. Safe until user opts in.
+- Command execution uses OpenCode-style prompt: "Allow Once" / "Allow Always" / "Deny"
+- `cozmo code init` walks CWD, respects `.gitignore`, indexes into Chroma `project_index`
+- ornith:9b with 256K context — can hold entire small projects. Chunking if needed later.
+- Memory shared between `cozmo run` and `cozmo code` (unified Chroma).
+
+**Obsidian memory**: read-only first (index vault `.md` files into Chroma). Bidirectional later (Cozmo writes `.md` files with YAML frontmatter into vault). Config option: `[memory] type = "obsidian"`.
+
+**Config CLI**: `cozmo config set/show/reset` — no manual TOML editing.
+
+**WebUI**: FastAPI + static HTML. `cozmo serve` on localhost:8080. Mobile-responsive. Phone-accessible on same network. After Cozmo Code + Config CLI.
+
+**OpenCode TUI reference** researched for future Cozmo TUI. Key patterns: `@` file search, `!` commands, `/` slash commands, undo/redo, status bar.
+
+**Full roadmap**:
+| Phase | What | When |
+|-------|------|------|
+| 4 | Cozmo Code | Next session |
+| 5 | Config CLI | After code |
+| 6 | Obsidian read-only | Soon |
+| 7 | WebUI | Later |
+| 8 | Full desktop, bidirectional Obsidian, PyPI | Eventually |
+
+See [PLAN.md](PLAN.md) for details.

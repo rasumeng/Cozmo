@@ -25,3 +25,4 @@ Thumbs.db
 
 # Cozmo data (user-local, not shared)
 data/
+chroma_db/
