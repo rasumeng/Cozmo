@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cozmo"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "langchain-ollama",
+    "langchain-core",
+    "langchain-community",
+    "chromadb",
+    "tomli-w",
+    "python-dotenv",
+]
+
+[tool.setuptools.packages.find]
+include = ["cozmo*"]
+
+[project.scripts]
+cozmo = "cozmo.cli:main"
