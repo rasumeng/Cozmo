@@ -7,4 +7,4 @@ def register_tool(name=None):
         return func
     return decorator
 
-from . import calculator, file_ops, web_search, desktop, telegram
+from . import calculator, file_ops, web_search, desktop, telegram, code_ops

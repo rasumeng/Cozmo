@@ -1,0 +1,71 @@
+"""Permission resolver with pattern-based rules and session-level allowlists."""
+
+from fnmatch import fnmatch
+
+
+def _input_key(tool: str, args: dict) -> str:
+    """Map tool call to the string used for pattern matching."""
+    if tool == "run_command":
+        return args.get("command", tool)
+    if tool in ("write_file", "edit_file", "read_file", "list_directory"):
+        return args.get("path", tool)
+    return tool
+
+
+class PermissionResolver:
+    def __init__(self, cfg: dict, auto: bool = False):
+        self.cfg = cfg
+        self.auto = auto
+        self._session_allow: set[str] = set()
+
+    def resolve(self, tool: str, args: dict, agent: str = "build") -> str:
+        """Check permission. Returns 'allow', 'deny', or 'ask'."""
+        key = _input_key(tool, args)
+
+        # Session allowlist check first
+        for pattern in self._session_allow:
+            if fnmatch(key, pattern):
+                return "allow"
+
+        # Agent-specific overrides
+        agent_cfg = self.cfg.get("agents", {}).get(agent, {})
+        result = self._match(tool, key, agent_cfg.get("permissions", {}))
+        if result:
+            return result
+
+        # Global permissions
+        result = self._match(tool, key, self.cfg.get("permissions", {}))
+        if result:
+            return result
+
+        return "allow"
+
+    def _match(self, tool: str, key: str, rules: dict) -> str | None:
+        if tool not in rules:
+            return None
+        rule = rules[tool]
+        if isinstance(rule, str):
+            return rule
+        if isinstance(rule, dict):
+            for pattern, action in reversed(list(rule.items())):
+                if pattern == "*" or fnmatch(key, pattern):
+                    return action
+        return None
+
+    def prompt(self, tool: str, args: dict, agent: str) -> bool:
+        """Ask user. Returns True if allowed."""
+        if self.auto:
+            return True
+        key = _input_key(tool, args)
+
+        while True:
+            print(f"\n⚠  [{agent}] {tool}: {key}")
+            ans = input("Allow (o)nce / (a)lways / (d)eny: ").strip().lower()
+            if ans in ("o", "once"):
+                return True
+            if ans in ("a", "always"):
+                self._session_allow.add(key)
+                return True
+            if ans in ("d", "deny", "n", "no"):
+                return False
+            print("  o = once, a = always, d = deny")

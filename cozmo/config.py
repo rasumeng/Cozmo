@@ -15,6 +15,17 @@ DEFAULT_CONFIG = {
     },
     "ollama": {"url": "http://localhost:11434"},
     "memory": {"max_turns_before_summary": 5, "max_short_term_pairs": 10},
+    "agents": {
+        "primary": ["build", "plan"],
+        "build": {"model": None, "permissions": {}},
+        "plan": {"model": None, "permissions": {"write_file": "deny", "edit_file": "deny", "run_command": "deny"}},
+    },
+    "permissions": {
+        "write_file": "ask",
+        "edit_file": "ask",
+        "run_command": {"*": "ask", "git *": "allow", "dir *": "allow"},
+    },
+    "code": {"index_extensions": ["*"]},
     "desktop": {"enabled": False},
     "telegram": {"enabled": False, "bot_token": "", "allowed_chat_ids": []},
 }

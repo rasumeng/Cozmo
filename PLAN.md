@@ -1,29 +1,18 @@
 # Cozmo — Local AI Agent
 
-**Goal**: Fully local AI agent that runs on-device via Ollama. Specialist model routing by task type. Vector DB memory. Tool-use for desktop, web, messaging. Pip-installable, configurable for any hardware.
+**Goal**: Fully local AI agent with elegant TUI, specialist model routing, and modular tool system. Every component UI-agnostic — TUI is just one frontend.
 
 ## Architecture
 
 ```
-User → CLI / Telegram
+UI Frontend (Textual TUI / CLI / Telegram)
          │
-    Orchestrator
-     ├── Heuristic pre-filter (0ms)
-     ├── LLM classifier (qwen3:0.6b) → chat | coder | vision | research
-     └── Router → picks specialist model
-                    │
-              Agent (specialist)
-               ├── Specialist system prompt
-               ├── Tool registry (all tools available)
-               └── Memory (ChromaDB query + update)
-
-cozmo code                    cozmo serve
-    │                              │
-CodeAgent                    FastAPI WebUI
- ├── Project index (Chroma)    ├── POST /chat
- ├── Code tools (write,        ├── WS /stream
- │   edit, grep, git, cmd)     ├── Settings page
- └── Context retrieval         └── Mobile-responsive
+     AgentRegistry
+      └── Agent (Build | Plan | Custom)
+           ├── System prompt (per-agent)
+           ├── Tool registry
+           ├── PermissionResolver (pattern-based gating)
+           └── Project index (Chroma)
 ```
 
 ## Model Registry
@@ -41,22 +30,33 @@ CodeAgent                    FastAPI WebUI
 ```
 cozmo/
 ├── __init__.py
-├── cli.py                   # main + code + serve + config subcommands
+├── cli.py                   # main + code + config subcommands
 ├── config.py                # TOML loader, DEFAULT_CONFIG
 ├── config_cli.py            # cozmo config set/show/reset
+├── code_indexer.py          # Chroma project indexer
 ├── telegram_bot.py
-├── webui.py                 # cozmo serve — FastAPI + static HTML
 ├── core/
-│   ├── agent.py             # specialist prompts + tool execution loop
-│   ├── code_agent.py        # extends Agent: project index, code tools
-│   └── orchestrator.py      # classifier + router + memory injection
+│   ├── agent.py             # Base Agent: tool loop, <tool> JSON parsing
+│   ├── code_agent.py        # Build agent: project index, tool exec, permissions
+│   ├── plan_agent.py        # Plan agent: read-only, blocks writes
+│   ├── agent_registry.py    # Create/list/switch agents, custom markdown agents
+│   ├── permissions.py       # PermissionResolver: fnmatch patterns, --auto
+│   ├── orchestrator.py      # Classifier + router + memory injection
+│   └── llm.py               # OllamaModel wrapper
+├── tui/
+│   ├── __init__.py           # CozmoApp export
+│   ├── app.py                # CozmoApp (Textual App)
+│   ├── sprite.py             # PNG → ANSI half-block art
+│   └── widgets/
+│       ├── __init__.py
+│       └── header.py         # CozmoHeader with sprite + badges
 ├── tools/
-│   ├── __init__.py           # tool registry + decorator
+│   ├── __init__.py           # Tool registry + @register_tool()
 │   ├── calculator.py
 │   ├── file_ops.py
 │   ├── code_ops.py           # write_file, edit_file, grep, run_cmd, git
 │   ├── web_search.py
-│   ├── desktop.py            # screenshot (with vision), clipboard
+│   ├── desktop.py            # screenshot, clipboard
 │   └── telegram.py
 ├── memory/
 │   ├── __init__.py
@@ -66,128 +66,90 @@ cozmo/
 
 ## Phases
 
-### Phase 1 — Core ✅
-- Package structure, pyproject.toml, pip-installable
-- CLI: `cozmo init`, `cozmo run`
-- Tool registry, calculator, file_ops
+### Phase 1 — Package scaffold ✅
+- pyproject.toml, pip-installable, CLI skeleton
+- `cozmo init`, `cozmo run`
 
 ### Phase 2 — Orchestrator ✅
-- Heuristic + LLM classifier
-- Task routing to specialist models
+- Heuristic + LLM classifier, task routing to specialist models
 - Conversation history
 
 ### Phase 3 — Memory + Tools ✅
-- ChromaDB memory with auto-summarization
-- web_search, desktop (screenshot + clipboard), Telegram
-- Cozmo Telegram bot
-- Specialist model routing (chat/coder/vision/research)
+- ChromaDB memory, auto-summarization
+- web_search, desktop, Telegram, specialist routing
 
-### Phase 4 — Cozmo Code (current)
-**Goal**: `cozmo code` — dedicated coding session like OpenCode/Claude Code.
+### Phase 4 — Cozmo Code ✅
+- `cozmo code` subcommand with CodeAgent
+- code_ops tools: write_file, edit_file, grep, run_command, git
+- ProjectIndex: walks CWD, chunks files, stores in Chroma `project_index`
+- ChromaStore API: `add_texts(texts, metadatas)`, `similarity_search(query, k)`
+- Tool `<tool>` JSON format (reliable with local Ollama models)
+- Command gating: Allow Once / Allow Always / Deny
 
-**CLI**:
-```bash
-cozmo code                          # interactive coding session in CWD
-cozmo code /path/to/project         # start session in specific dir
-cozmo code "refactor this function" # single-shot
-cozmo code init                     # index project into Chroma
-```
+### Phase 5 — UX improvements ✅
+- `!cmd` shell passthrough, `/` slash commands, `@file` autocomplete
+- Status bar `[model:ornith:9b turns:3]`
+- `cozmo config show|set|reset` with dot-notation keys
+- `/compact` context compaction
+- prompt_toolkit integration: FileHistory, completions, key bindings
 
-**New tools** (`tools/code_ops.py`):
-| Tool | Description | Safety |
-|------|-------------|--------|
-| `write_file(path, content)` | Create/overwrite file | ✅ always allowed |
-| `edit_file(path, old_text, new_text)` | Surgical text replacement | ✅ always allowed |
-| `grep_search(pattern, path=".")` | Regex search across files | ✅ always allowed |
-| `run_command(command)` | Execute shell command | ❌ gated (default false) |
-| `git_diff()` | Show unstaged diff | ✅ always allowed |
-| `git_log(lines=10)` | Show recent commits | ✅ always allowed |
+### Phase 6 — Multi-agent system ✅
+- AgentRegistry: create/list/switch agent instances
+- PlanAgent: read-only, blocks write_file/edit_file/run_command
+- Custom markdown agents (.cozmo/agents/*.md)
+- F2 keybinding for agent cycling
+- `/agent`, `/agents` commands
 
-**Command execution flow** (when enabled):
-1. Agent proposes command: `run_command("rm -rf /")`
-2. **Prompt user**: "Allow Once" / "Allow Always" / "Deny"
-3. "Allow Always" → whitelist command or session
-4. Result returned to agent
+### Phase 7 — Permission system ✅
+- PermissionResolver: fnmatch pattern matching, session allowlist
+- `resolve(tool, args, agent) → allow|deny|ask`
+- Interactive prompt: once / always / deny
+- Per-agent permission overrides (PlanAgent = deny writes)
+- `--auto` flag for non-interactive mode
+- Pattern-based bash rules (`git *` → allow, `*` → ask)
 
-**Project index**:
-- `cozmo code init` walks CWD recursively
-- Respects `.gitignore`
-- Splits source files into chunks
-- Stores in Chroma collection `project_index`
-- On each query: retrieve relevant snippets → inject as context
-- Extensions: `.py`, `.js`, `.ts`, `.rs`, `.go`, `.md`, `.toml` (configurable)
+### Phase 8 — Textual TUI (current)
+**Goal**: Replace prompt_toolkit loop with full-screen Textual TUI.
 
-**Model**: ornith:9b (256K context — can hold entire small projects)
+**Done**:
+- `tui/` package structure with __init__, app, sprite modules
+- `sprite.py`: Cozmo-sprite.png → ANSI half-block art via Pillow
+- `widgets/header.py`: CozmoHeader with sprite + model/agent badges
+- Textual v8.2.8 verified running on Windows Terminal
 
-**Memory**: shares Chroma with `cozmo run` — coding context + conversation context are unified.
+**Planned widgets**:
+| Widget | File | Role |
+|--------|------|------|
+| ChatLog | `widgets/chat_log.py` | Scrollable message history with colored prefixes |
+| InputBar | `widgets/input_bar.py` | Input with @file, !cmd, /slash parsing |
+| StatusBar | `widgets/status_bar.py` | Reactive: turns, auto, agent, model |
+| ToolBlock | `widgets/tool_block.py` | Collapsible tool execution output |
 
-### Phase 5 — Config CLI
-```bash
-cozmo config set models.chat "phi4-mini:3.8b"
-cozmo config set desktop.enabled true
-cozmo config show
-cozmo config reset
-```
-Backed by `tomllib`/`tomli_w`. No manual TOML editing needed.
+**Planned features**:
+- `chat_log.py` → RichLog with append_user/assistant/tool methods
+- `input_bar.py` → Textual Input with @ fuzzy completer
+- Wire AgentRegistry into app with worker pattern
+- Collapsible tool output blocks (▶/▼ toggle)
+- Streaming token-by-token response
+- Status bar reactive updates
 
-### Phase 6 — Obsidian Memory (Read-Only)
-**Default**: Chroma backend unchanged.
+**Not breaking**:
+- `cozmo code "query"` (single-shot) stays on fast prompt_toolkit path
+- AgentRegistry, CodeAgent, PermissionResolver unchanged
+- Telegram bot, `cozmo run` CLI unchanged
 
-**Optional backend** `type = "obsidian"`:
-- On first run: walk Obsidian vault folder, index all `.md` files into separate Chroma collection `obsidian_vault`
-- On each query: search both `cozmo_memories` + `obsidian_vault`, merge results
-- Re-index on demand via `cozmo memory index`
+### Phase 9 — Streaming + Tool Cards
+- Token-by-token streaming via worker
+- Tool execution cards with live status
+- `/details` toggle for raw tool JSON
+- `/thinking` toggle for reasoning blocks
 
-**Config**:
-```toml
-[memory]
-type = "chroma"                 # or "obsidian"
-obsidian_vault_path = ""        # e.g. "C:/Users/you/Obsidian/MyVault"
-```
-
-**Future bidirectional**: Cozmo writes memory summaries as `.md` files with YAML frontmatter into the vault. You see/edit them in Obsidian.
-
-### Phase 7 — WebUI
-```bash
-cozmo serve              # localhost:8080
-cozmo serve --port 3000  # custom port
-```
-
-**Stack**: FastAPI + static HTML (single-file or htmx). Mobile-responsive.
-
-**Endpoints**:
-- `POST /chat` → Orchestrator.run(text)
-- `WS /stream` → streaming token-by-token response
-- `GET /history` → past conversations from Chroma
-- `GET /settings` → mirror of `cozmo config show`
-
-Phone-accessible on same network. Secure remote access via Tailscale later.
-
-### Phase 8 — Advanced
-- Full desktop control (pyautogui: mouse, keyboard, window management)
-- Bidirectional Obsidian (Cozmo writes memory notes into vault)
-- Hardware auto-detect → model recommendations (`cozmo doctor`)
-- CI/CD + PyPI publishing
-
-## Reference: OpenCode TUI Design
-
-OpenCode's TUI (built on OpenTUI + SolidJS) provides a reference pattern:
-
-**Layout**:
-- Header bar: version, session status, agent mode, help
-- Chat panel: scrollable message history with tool execution details
-- Input area: prompt entry with `@` file autocomplete
-- Status bar: status, modified files, token count, menu
-
-**Key UX patterns**:
-- `@` fuzzy file search in prompts
-- `!` prefix runs shell command directly
-- `/` slash commands (help, new, undo, redo, compact, export)
-- `Ctrl+X` leader key for keyboard shortcuts
-- Undo/redo via history stack
-- `Ctrl+R` redraw screen if garbled
-
-For Cozmo, start simple: `readline`-based input with `cozmo code` prefix commands. Add `@` file search and rich TUI later.
+### Phase 10 — Polish
+- Theme system (tokyonight, catppuccin, etc.)
+- Chat export to markdown
+- `/undo`/`/redo` via git stash
+- Session management UI
+- Command palette (Ctrl+P)
 
 ## Config
 
@@ -199,12 +161,27 @@ coder = "ornith:9b"
 vision = "qwen2.5vl:7b"
 research = "qwen3:8b"
 
-[code]
-allow_commands = false
+[agents]
+primary = ["build", "plan"]
+
+[agents.build]
+model = null
+permissions = {}
+
+[agents.plan]
+model = null
+permissions = {write_file = "deny", edit_file = "deny", run_command = "deny"}
+
+[permissions]
+write_file = "ask"
+edit_file = "ask"
+[permissions.run_command]
+"*" = "ask"
+"git *" = "allow"
+"dir *" = "allow"
 
 [memory]
 type = "chroma"
-obsidian_vault_path = ""
 
 [desktop]
 enabled = false
@@ -213,3 +190,11 @@ enabled = false
 enabled = false
 bot_token = ""
 ```
+
+## Design Principles
+
+1. **UI-agnostic core**: Agent logic never imports from `tui/`. TUI is a frontend, not the system.
+2. **One layer at a time**: Each phase builds on the previous without refactoring it.
+3. **Single-shot still fast**: `cozmo code "query"` bypasses TUI entirely — no rendering overhead.
+4. **All decisions in config.toml**: No hardcoded paths, models, or permissions.
+5. **Fail toward simplicity**: If Textual breaks, fallback is prompt_toolkit Layout, not raw curses.
