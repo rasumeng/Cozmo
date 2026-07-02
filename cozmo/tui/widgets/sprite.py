@@ -4,9 +4,9 @@ from rich.color import Color as RichColor
 from rich.style import Style
 from rich.text import Text
 
-SPRITE_PATH = Path(__file__).resolve().parents[2] / "Cozmo-sprite.png"
+SPRITE_PATH = Path(__file__).resolve().parents[3] / "Cozmo-sprite.png"
 
-ALPHA_THRESHOLD = 16  # lower than before; blend rather than hard-cut where possible
+ALPHA_THRESHOLD = 16
 
 
 def _rgba_to_rich(rgba: tuple[int, int, int, int]) -> RichColor | None:
@@ -17,23 +17,19 @@ def _rgba_to_rich(rgba: tuple[int, int, int, int]) -> RichColor | None:
 
 
 def render_sprite(width: int | None = None, height: int | None = None) -> Text:
-    """Convert Cozmo-sprite.png to ANSI half-block art.
-
-    If width/height are omitted, they're derived from the source image's
-    aspect ratio (accounting for terminal cells being ~2x taller than wide).
-    """
     img = Image.open(SPRITE_PATH).convert("RGBA")
     src_w, src_h = img.size
 
     if width is None and height is None:
-        height = 16  # sensible default row count
+        width = src_w
+        height = src_h // 2
     if height is None:
         height = round(width * (src_h / src_w) * 0.5)
     if width is None:
         width = round(height * (src_w / src_h) * 2)
 
-    # NEAREST keeps pixel-art edges crisp instead of blurring them
-    img = img.resize((width, height * 2), Image.NEAREST)
+    if (width, height * 2) != img.size:
+        img = img.resize((width, height * 2), Image.NEAREST)
     px = img.load()
 
     result = Text()
@@ -43,7 +39,7 @@ def render_sprite(width: int | None = None, height: int | None = None) -> Text:
             lower = _rgba_to_rich(px[x, y + 1]) if y + 1 < img.height else None
 
             if upper is None and lower is None:
-                result.append(" ")  # transparent, no bg forced
+                result.append(" ")
             elif upper == lower:
                 result.append(" ", Style(bgcolor=upper))
             elif lower is None:
@@ -59,5 +55,5 @@ def render_sprite(width: int | None = None, height: int | None = None) -> Text:
 if __name__ == "__main__":
     from rich.console import Console
     console = Console()
-    console.print(render_sprite())          # auto-sized from aspect ratio
-    console.print(render_sprite(width=32, height=16))  # near-1:1 pixel mapping
+    console.print(render_sprite())
+    console.print(render_sprite(width=40, height=12))

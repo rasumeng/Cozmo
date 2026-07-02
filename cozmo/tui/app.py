@@ -1,15 +1,24 @@
-from textual.app import App, ComposeResult
-from .widgets.header import CozmoHeader
+from textual.app import App
+from .screens.main import MainScreen
+from .screens.settings import SettingsScreen
+from .themes import cozmo
 
 
 class CozmoApp(App):
-    TITLE = "Cozmo"
-    SUB_TITLE = "coding agent"
+    SCREENS = {
+        "main": MainScreen,
+        "settings": SettingsScreen,
+    }
 
-    def compose(self) -> ComposeResult:
-        yield CozmoHeader(model="ornith:9b", agent="build")
+    def on_mount(self) -> None:
+        self.register_theme(cozmo)
+        self.theme = "cozmo"
+        self.push_screen("main")
 
     def on_key(self, event):
-        match event.key:
-            case "q":
-                exit()
+        if event.key == "q":
+            exit()
+
+
+if __name__ == "__main__":
+    CozmoApp().run()

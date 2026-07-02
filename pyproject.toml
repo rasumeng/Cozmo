@@ -17,6 +17,7 @@ dependencies = [
     "pyperclip",
     "Pillow",
     "prompt-toolkit",
+    "textual>=8.2",
 ]
 
 [project.optional-dependencies]

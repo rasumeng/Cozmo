@@ -206,6 +206,8 @@ def main():
     code_parser.add_argument("--init", action="store_true", help="Index project into Chroma")
     code_parser.add_argument("--auto", action="store_true", help="Non-interactive — allow all permission prompts")
 
+    sub.add_parser("tui", help="Launch the Textual TUI")
+
     config_parser = sub.add_parser("config", help="Manage configuration")
     config_parser.add_argument("action", choices=["show", "set", "reset"], nargs="?")
     config_parser.add_argument("key", nargs="?", help="Config key (e.g. models.coder)")
@@ -236,6 +238,10 @@ def main():
             print(f"Indexed {n} files in {project_path}")
             return
         coding_session(cfg, project_path, args.query, auto=args.auto)
+
+    elif args.command == "tui":
+        from .tui.app import CozmoApp
+        CozmoApp().run()
 
     elif args.command == "config":
         from .config_cli import handle_config

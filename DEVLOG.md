@@ -392,3 +392,80 @@ See [PLAN.md](PLAN.md) for details.
 - Stale `__pycache__` dirs cleaned from tui/ ✅
 
 **Next**: ChatLog widget (RichLog with colored message prefixes), then InputBar with @ autocomplete, then wire AgentRegistry.
+
+---
+
+### 2026-07-01 — CozmoTUI standalone repo
+
+**Context**: Got stuck/overwhelmed building the TUI inside the main project. Stepped away, created a separate repo `rasumeng/CozmoTUI` to build it without the baggage of the full project.
+
+**Built from scratch** (standalone, no Cozmo deps):
+- `CozmoTUI/` repo with `cozmo.py` entry point
+- `screens/main.py` — MainScreen: grid layout sidebar + main panel + footer
+- `screens/settings.py` — Settings modal (theme, model display)
+- `widgets/sidebar.py` — Tabbed sidebar with Chat / Collab / Code tabs
+- `widgets/footer.py` — Bottom toolbar: Collapse, Settings, Exit buttons
+- `widgets/input.py` — ChatInput: message field + send button + file attach placeholder
+- `widgets/code_input.py` — CodeInput: Build/Plan mode toggle via Tab key
+- `widgets/panels/panel.py` — ChatPanel, CollabPanel, CodePanel with sprite greetings + input
+- `widgets/sprite.py` — Cozmo-sprite.png → ANSI half-block art (ported from main project)
+- `themes.py` — Custom dark theme with purple accents
+- `styles/app.tcss` — Full stylesheet covering all widgets
+- `assets/Cozmo-sprite.png` — Logo asset
+
+**Design**: Three-panel concept — Chat (general conversation), Collab (research/collaboration), Code (coding with Build/Plan agents). Sidebar for tab switching and session management. Footer for global actions.
+
+**Status**: Fully functional UI shell. No actual LLM wiring — pure frontend, ready for backend integration.
+
+---
+
+### 2026-07-02 — CozmoTUI merged into main Cozmo project
+
+**Context**: CozmoTUI standalone build was complete. Time to bring it back into the main Cozmo project as `cozmo.tui` package, replacing the partial Phase 8 implementation.
+
+**Merge changes**:
+- Replaced old `cozmo/tui/` contents with CozmoTUI files, adapted for package structure
+- All imports changed from flat (`from screens.x`, `from widgets.x`) to relative (`from ..screens.x`, `from ..widgets.x`)
+- `widgets/sprite.py` path updated from `assets/` to project-root `Cozmo-sprite.png`
+- Old files removed: `tui/sprite.py` (superseded), `tui/css/cozmo.tcss` (empty)
+- `cozmo tui` CLI subcommand added to `cli.py` → launches `CozmoApp().run()`
+- `textual>=8.2` added to `pyproject.toml` dependencies
+- `PLAN.md` Phase 8 marked complete
+- Kept existing `widgets/header.py` (CozmoHeader with sprite + badges) — available for future use
+
+**Design decisions**:
+- UI shell only for now — no LLM wiring yet. Next phase will wire each tab to its specialist model.
+- CozmoTUI's sprite renderer kept (default sizing matches source aspect ratio better)
+- Old `tui/sprite.py` deleted — single sprite source in `widgets/sprite.py`
+
+**Architecture**:
+```
+cozmo.tui
+├── app.py              ← CozmoApp (Textual App), SCREENS: main, settings
+├── themes.py           ← Dark theme definitions
+├── screens/
+│   ├── main.py         ← MainScreen: sidebar + panels + footer
+│   └── settings.py     ← SettingsModal
+├── widgets/
+│   ├── sidebar.py      ← Sidebar with Chat/Collab/Code tabs
+│   ├── footer.py       ← AppFooter toolbar
+│   ├── input.py        ← ChatInput
+│   ├── code_input.py   ← CodeInput with Build/Plan toggle
+│   ├── header.py       ← CozmoHeader (kept from Phase 8)
+│   ├── sprite.py       ← ANSI half-block sprite renderer
+│   └── panels/
+│       └── panel.py    ← ChatPanel, CollabPanel, CodePanel, MainPanel
+└── css/
+    └── app.tcss        ← Stylesheet
+```
+
+**Verified**:
+- `cozmo tui` launches CozmoApp with correct theme and screen layout ✅
+- Sidebar tab switching works (Chat ↔ Collab ↔ Code) ✅
+- CodeInput Tab toggle cycles Build/Plan ✅
+- Footer Collapse toggles sidebar visibility ✅
+- Settings modal opens and closes ✅
+- Old `pyproject.toml` updated ✅
+- All `__pycache__` cleaned ✅
+
+**Status**: `cozmo tui` launches full Textual TUI — UI shell complete. Ready for agent wiring in next phase.

@@ -108,30 +108,32 @@ cozmo/
 - `--auto` flag for non-interactive mode
 - Pattern-based bash rules (`git *` → allow, `*` → ask)
 
-### Phase 8 — Textual TUI (current)
+### Phase 8 — Textual TUI ✅
 **Goal**: Replace prompt_toolkit loop with full-screen Textual TUI.
 
+**Completed 2026-07-02** via standalone [CozmoTUI](https://github.com/rasumeng/CozmoTUI) repo merged back.
+
 **Done**:
-- `tui/` package structure with __init__, app, sprite modules
-- `sprite.py`: Cozmo-sprite.png → ANSI half-block art via Pillow
-- `widgets/header.py`: CozmoHeader with sprite + model/agent badges
-- Textual v8.2.8 verified running on Windows Terminal
+- Standalone CozmoTUI built in separate repo (7/1-7/2/2026)
+- Merged into main Cozmo project as `cozmo.tui` package
+- `screens/main.py` — MainScreen: sidebar + panels + footer layout
+- `screens/settings.py` — Settings modal (theme, model info)
+- `widgets/sidebar.py` — Tabbed sidebar: Chat / Collab / Code
+- `widgets/footer.py` — Bottom toolbar: Collapse / Settings / Exit
+- `widgets/input.py` — Chat input with send button + attach placeholder
+- `widgets/code_input.py` — Code input with Build/Plan mode toggle (Tab)
+- `widgets/panels/panel.py` — ChatPanel, CollabPanel, CodePanel, MainPanel
+- `widgets/sprite.py` — CozmoTUI's sprite renderer (port of old tui/sprite.py)
+- `themes.py` — Custom "cozmo" theme (dark, purple accents)
+- `css/app.tcss` — Full stylesheet for all widgets
+- `cli.py` — `cozmo tui` subcommand launcher
+- `textual>=8.2` added to pyproject.toml
 
-**Planned widgets**:
-| Widget | File | Role |
-|--------|------|------|
-| ChatLog | `widgets/chat_log.py` | Scrollable message history with colored prefixes |
-| InputBar | `widgets/input_bar.py` | Input with @file, !cmd, /slash parsing |
-| StatusBar | `widgets/status_bar.py` | Reactive: turns, auto, agent, model |
-| ToolBlock | `widgets/tool_block.py` | Collapsible tool execution output |
-
-**Planned features**:
-- `chat_log.py` → RichLog with append_user/assistant/tool methods
-- `input_bar.py` → Textual Input with @ fuzzy completer
-- Wire AgentRegistry into app with worker pattern
-- Collapsible tool output blocks (▶/▼ toggle)
-- Streaming token-by-token response
-- Status bar reactive updates
+**Wiring not yet done** (next phase):
+- ChatPanel → Orchestrator (chat model)
+- CollabPanel → Orchestrator (research model)
+- CodePanel → AgentRegistry (coder model)
+- Streaming, tool cards, status bar updates
 
 **Not breaking**:
 - `cozmo code "query"` (single-shot) stays on fast prompt_toolkit path
