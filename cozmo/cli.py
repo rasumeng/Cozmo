@@ -11,7 +11,6 @@ from prompt_toolkit.key_binding import KeyBindings
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 from . import config
-from .core.orchestrator import Orchestrator
 
 HISTORY_FILE = Path.home() / ".cozmo" / ".history"
 
@@ -75,10 +74,16 @@ def interactive_session(cfg: dict, initial_query: str | None = None):
 
     ollama_url = cfg.get("ollama", {}).get("url", "http://localhost:11434")
     classifier_model = cfg.get("models", {}).get("classifier", "qwen3:0.6b")
-    llm = OllamaModel(classifier_model, ollama_url)
-    memory = MemoryManager(llm, persist_dir=str(Path.home() / ".cozmo" / "memory"))
+    chat_model = cfg.get("models", {}).get("chat", "qwen2.5:7b")
+    llm = OllamaModel(chat_model, ollama_url)
+    router_llm = OllamaModel(classifier_model, ollama_url)
+    memory = MemoryManager(router_llm, persist_dir=str(Path.home() / ".cozmo" / "memory"))
     project_index = ProjectIndex(Path.cwd())
-    runtime = CozmoRuntime(llm=llm, memory=memory, project_index=project_index, cfg=cfg)
+    runtime = CozmoRuntime(llm=llm, memory=memory, project_index=project_index, cfg=cfg,
+                           router_llm=router_llm)
+    runtime.set_permission_callback(
+        lambda tool, args: runtime._perms.prompt(tool, args, "cozmo")
+    )
 
     if initial_query:
         _safe_print(f"\nCozmo: {runtime.run(initial_query)}\n")
@@ -101,10 +106,17 @@ def coding_session(cfg: dict, project_path: Path, query: str | None = None, auto
 
     ollama_url = cfg.get("ollama", {}).get("url", "http://localhost:11434")
     classifier_model = cfg.get("models", {}).get("classifier", "qwen3:0.6b")
-    llm = OllamaModel(classifier_model, ollama_url)
-    memory = MemoryManager(llm, persist_dir=str(Path.home() / ".cozmo" / "memory"))
+    coder_model = cfg.get("models", {}).get("coder", "qwen2.5:7b")
+    llm = OllamaModel(coder_model, ollama_url)
+    router_llm = OllamaModel(classifier_model, ollama_url)
+    memory = MemoryManager(router_llm, persist_dir=str(Path.home() / ".cozmo" / "memory"))
     project_index = ProjectIndex(project_path)
-    runtime = CozmoRuntime(llm=llm, memory=memory, project_index=project_index, cfg=cfg)
+    runtime = CozmoRuntime(llm=llm, memory=memory, project_index=project_index, cfg=cfg,
+                           router_llm=router_llm)
+    runtime._perms.auto = auto
+    runtime.set_permission_callback(
+        lambda tool, args: runtime._perms.prompt(tool, args, "cozmo")
+    )
 
     if query:
         _safe_print(f"\nCozmo: {runtime.run(query)}\n")
@@ -154,10 +166,10 @@ def coding_session(cfg: dict, project_path: Path, query: str | None = None, auto
                 break
             cmd = cmd_raw
             if cmd in ("new", "clear"):
-                runtime = CozmoRuntime(llm=llm, memory=memory, project_index=project_index, cfg=cfg)
+                runtime.reset()
                 print("Session cleared.")
             elif cmd == "compact":
-                runtime.history.clear()
+                runtime.reset()
                 print("History cleared.")
             elif cmd == "help":
                 print(
@@ -195,10 +207,14 @@ def run_telegram(cfg: dict):
 
     ollama_url = cfg.get("ollama", {}).get("url", "http://localhost:11434")
     classifier_model = cfg.get("models", {}).get("classifier", "qwen3:0.6b")
-    llm = OllamaModel(classifier_model, ollama_url)
-    memory = MemoryManager(llm, persist_dir=str(Path.home() / ".cozmo" / "memory"))
+    chat_model = cfg.get("models", {}).get("chat", "qwen2.5:7b")
+    llm = OllamaModel(chat_model, ollama_url)
+    router_llm = OllamaModel(classifier_model, ollama_url)
+    memory = MemoryManager(router_llm, persist_dir=str(Path.home() / ".cozmo" / "memory"))
     project_index = ProjectIndex(Path.cwd())
-    runtime = CozmoRuntime(llm=llm, memory=memory, project_index=project_index, cfg=cfg)
+    runtime = CozmoRuntime(llm=llm, memory=memory, project_index=project_index, cfg=cfg,
+                           router_llm=router_llm)
+    # headless: no way to ask — 'ask' rules resolve to deny (fail safe)
 
     bot = TelegramBot(token, runtime)
     set_bot_instance(bot)

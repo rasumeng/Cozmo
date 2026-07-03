@@ -91,6 +91,8 @@ class ChatPanel(ChatMixin, Widget):
 
     def reset(self) -> None:
         self.active_chat_id = None
+        if self.runtime:
+            self.runtime.reset()
         self._clear_messages()
         self._show_greeting()
         self._set_input_enabled(True)
@@ -102,6 +104,19 @@ class ChatPanel(ChatMixin, Widget):
         self._hide_greeting()
         for msg in messages:
             self._add_message(msg["role"], msg["text"])
+
+        # rebuild the model's conversation memory so follow-ups have context
+        if self.runtime:
+            self.runtime.reset()
+            pending_user = None
+            for msg in messages:
+                if msg["role"] == "user":
+                    pending_user = msg["text"]
+                elif pending_user is not None:
+                    self.runtime.history.append((pending_user, msg["text"]))
+                    pending_user = None
+            self.runtime.history = self.runtime.history[-self.runtime.max_history:]
+
         self._set_input_enabled(True)
 
     def on_chat_input_message_sent(self, event: ChatInput.MessageSent) -> None:
@@ -235,6 +250,8 @@ class CollabPanel(ChatMixin, Widget):
 
     def reset(self) -> None:
         self.active_chat_id = None
+        if self.runtime:
+            self.runtime.reset()
         self._clear_messages()
         self._show_greeting()
         self._set_input_enabled(True)
@@ -348,6 +365,8 @@ class CodePanel(ChatMixin, Widget):
 
     def reset(self) -> None:
         self.active_chat_id = None
+        if self.runtime:
+            self.runtime.reset()
         self._mode = "Build"
         self._clear_messages()
         self._show_greeting()

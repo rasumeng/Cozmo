@@ -72,6 +72,8 @@ class ChatMixin:
         )
 
     def _mount_stream_msg(self):
+        # defensive: a previous stream that errored/emptied may have left one behind
+        self._remove_stream_msg()
         history = self.query_one(f"#{self._chat_history_id()}", ScrollableContainer)
         history.mount(self._create_stream_msg())
         history.scroll_end(animate=False)

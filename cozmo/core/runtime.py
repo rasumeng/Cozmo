@@ -1,117 +1,126 @@
 """
-CozmoRuntime — single execution pipeline replacing all legacy agents.
+CozmoRuntime — native tool-calling agentic loop.
 
-Pipeline:
+A real ReAct loop: the model sees tool results and decides the NEXT action,
+iterating until it chooses to answer. Tool calls use Ollama's native function
+calling (`bind_tools`) with a text-JSON fallback for models that emit tool
+calls as plain content instead of structured `tool_calls`.
+
+Loop:
   USER INPUT
-  → CONTEXT BUILDER (memory + history + project)
-  → CLASSIFY + TOOL GATE (single LLM call)
-  → EXECUTE TOOLS (sanitized, capped)
-  → GENERATE RESPONSE (draft)
-  → COMPILE (strip artifacts, normalize)
-  → FINAL OUTPUT
+  → route (chat / work / research) → tool subset + temperature
+  → research: FORCED grounding search before the loop (small local models
+    skip tools and hallucinate current events if you let them choose)
+  → LOOP: model.invoke → tool_calls? → permission gate → exec → feed back
+                       ↘ no calls → stream final answer → done
+  → compact history when it grows past the window
 """
 
 import json
 import re
-from pathlib import Path
+from datetime import datetime
+
+from langchain_core.messages import (
+    AIMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
+from langchain_core.tools import StructuredTool
 
 from .llm import OllamaModel
+from .permissions import PermissionResolver
 from ..tools import TOOL_REGISTRY
 
 
 # ── Prompts ──────────────────────────────────────────────────────────────────
 
-_CLASSIFY_AND_GATE_PROMPT = """You are a routing engine. Analyze the user request and return a JSON object.
+_IDENTITY = (
+    "You are Cozmo, a capable local AI coding agent (like Claude Code) running "
+    "entirely on-device via Ollama. You help with coding, file editing, "
+    "debugging, running commands, research, and general questions.\n"
+    "Today's date is {date}. Your training data is older than this — for "
+    "anything time-sensitive, trust tool results over your own knowledge.\n\n"
+    "AGENT BEHAVIOR:\n"
+    "- You work in a LOOP. Call a tool, read its result, then decide the next "
+    "step. Keep going until the task is actually done, then give a final answer.\n"
+    "- Prefer acting with tools over guessing. To answer questions about files "
+    "or the codebase, READ them first — never invent file contents.\n"
+    "- If a tool returns an error, read the error and try a corrected call — "
+    "do not give up after one failure, and do not repeat the identical call.\n"
+    "- Take ONE concrete step at a time. Don't announce a plan and stop; execute it.\n"
+    "- When the task is complete, respond with a normal message and NO tool call. "
+    "That message is shown to the user as the final answer.\n"
+    "- Be concise and direct. No hedging ('as of my last update'), no filler.\n"
+)
 
-Classify the intent into exactly one mode:
-- CHAT: greetings, conversation, explanations, definitions, general Q&A about KNOWN facts (e.g. "what is Python", "explain recursion")
-- WORK: coding, file editing, debugging, running commands, writing code, system tasks
-- RESEARCH: ANYTHING that needs current/real-time/external information, including:
-  * Current events, news, sports scores, schedules, standings
-  * Weather, prices, stock values, exchange rates
-  * Recent releases, updates, announcements
-  * Anything where the answer changes over time
-  * Questions about "today", "this week", "latest", "next", "upcoming"
-  * Anything you are NOT 100% certain about from training data
-
-When in doubt, classify as RESEARCH.
-
-Then decide if tools are needed. Available tools:
-- web_search: search the web for current information
-- web_search_pipeline: advanced multi-source search with synthesis
-- web_fetch: fetch content from a URL
-- calculator: math calculations
-- read_file: read file contents
-- write_file: create or overwrite a file
-- edit_file: edit an existing file
-- run_command: execute a shell command
-- grep_search: regex search across files
-- list_directory: list files in a directory
-- git_diff: show git diff
-- git_log: show recent git commits
-
-Rules:
-- CHAT mode: tools are NOT needed.
-- WORK mode: tools are usually needed.
-- RESEARCH mode: ALWAYS use web_search_pipeline for current/recent information.
-- Return a maximum of 3 tool calls.
-- Always provide a short reason.
-
-Return ONLY valid JSON, no other text:
-{
-  "mode": "CHAT|WORK|RESEARCH",
-  "use_tools": true/false,
-  "tools": [{"name": "tool_name", "args": {"key": "value"}}],
-  "reason": "one sentence"
-}"""
-
-_GENERATE_PROMPT = """You are Cozmo, a helpful AI assistant.
-
-Mode: {mode}
-{mode_instructions}
-
-Previous conversation:
-{history}
-
-Relevant memories:
-{memory}
-
-Project context:
-{project}
-
-User request: {user_input}
-
-Tool results:
-{tool_results}
-
-Instructions:
-- Answer directly and confidently
-- Do NOT use hedging phrases like "as of my last update" or "please note"
-- Do NOT include tool call XML in your response
-- Be concise unless the user asks for detail
-- If tool results contain the answer, use them directly
-- If no tools were used, answer from your knowledge"""
-
-_MODE_INSTRUCTIONS = {
-    "CHAT": "Be concise and conversational. Friendly but direct.",
-    "WORK": "Be precise and technical. Show code when relevant. Explain changes briefly.",
-    "RESEARCH": "Be thorough and cite sources from tool results. Be factual and direct.",
+_MODE_DISCIPLINE = {
+    "chat": (
+        "MODE: CHAT\n"
+        "- Answer conversationally and concisely from your knowledge.\n"
+        "- If the question actually needs current data or file access, say what "
+        "you'd need instead of guessing."
+    ),
+    "work": (
+        "MODE: WORK — you are operating on a real codebase.\n"
+        "- ALWAYS read a file before editing it. Match the existing style.\n"
+        "- Make edits with edit_file (exact-match replace) for changes to "
+        "existing files; write_file only for new files.\n"
+        "- VERIFY your work: after editing code, run a quick check with "
+        "run_command (e.g. `python -m py_compile <file>`, the project's tests, "
+        "or the relevant command) and fix anything that breaks.\n"
+        "- Never claim something works without having verified it. If you "
+        "could not verify, say so explicitly.\n"
+        "- In your final answer: summarize WHAT changed, WHERE (file paths), "
+        "and how it was verified."
+    ),
+    "research": (
+        "MODE: RESEARCH — the user needs CURRENT information.\n"
+        "- Search results are provided below and via tools. Base your answer "
+        "ONLY on those results, never on training data — your training data "
+        "is stale for this question.\n"
+        "- If the provided results don't contain the answer, call web_search "
+        "or web_search_pipeline again with a better query. Do NOT answer from "
+        "memory.\n"
+        "- If results conflict, prefer the most recent and say so.\n"
+        "- Cite where facts came from (source names/domains from the results).\n"
+        "- If you genuinely cannot find the answer in any results, say exactly "
+        "that — do not fabricate."
+    ),
 }
 
-_COMPILE_STRIP_PATTERNS = [
-    re.compile(r"<tool>.*?</tool>", re.DOTALL),
-    re.compile(r"</?tool>", re.DOTALL),
-    re.compile(r"<tool[^>]*>", re.DOTALL),
-    re.compile(r"<web_search>.*?</web_search>", re.DOTALL),
-    re.compile(r"<web_fetch>.*?</web_fetch>", re.DOTALL),
-    re.compile(r"</?(?:web_search|web_fetch)>", re.DOTALL),
-]
+_ROUTE_PROMPT = """Classify the user's latest request as exactly one word:
+- chat: greetings, small talk, definitions, general Q&A answerable from timeless knowledge
+- work: coding, editing files, debugging, shell commands, anything touching the project
+- research: needs current/external info (news, events, wars, sports, prices, weather, releases, schedules, "today", "latest", "recent", "next", "upcoming")
+
+Anything about current events or things that change over time is research, even if phrased vaguely.
+When unsure between chat and research, pick research. When it touches code or files, pick work.
+
+Recent conversation (for context on vague follow-ups):
+{history}
+
+Request: {text}
+Answer with one word:"""
+
+_COMPACT_PROMPT = """Condense this conversation into a short context note (4-6 sentences max).
+Keep: what the user is working on, key facts established, decisions made, user preferences.
+Drop: greetings, pleasantries, resolved dead-ends.
+
+{text}
+
+Context note:"""
+
+# text-fallback: models that don't emit native tool_calls sometimes emit JSON.
+_TEXT_TOOLCALL_RE = re.compile(r"\{.*\}", re.DOTALL)
+
+_SEARCH_TOOL_PREFERENCE = ("web_search_pipeline", "web_search")
 
 
 # ── Runtime ──────────────────────────────────────────────────────────────────
 
 class CozmoRuntime:
-    """Single runtime loop. Replaces all legacy agents."""
+    """Single agentic runtime loop with native tool calling."""
 
     def __init__(
         self,
@@ -120,257 +129,347 @@ class CozmoRuntime:
         tools: dict | None = None,
         project_index=None,
         cfg: dict | None = None,
+        router_llm: OllamaModel | None = None,
     ):
         self.llm = llm
+        self.router_llm = router_llm or llm
         self.memory = memory
         self.tools = tools or TOOL_REGISTRY
         self.project_index = project_index
         self.cfg = cfg or {}
         self.history: list[tuple[str, str]] = []
+        self._summary: str = ""  # compacted old history
 
-        rt_cfg = self.cfg.get("runtime", {})
-        self.max_history = rt_cfg.get("max_history", 10)
-        self.max_tool_calls = rt_cfg.get("max_tool_calls", 3)
-        self.max_tool_output = rt_cfg.get("max_tool_output_chars", 8000)
-        self.memory_distance_threshold = rt_cfg.get("memory_distance_threshold", 0.5)
-        self.max_memory_results = rt_cfg.get("max_memory_results", 3)
-        self.max_project_results = rt_cfg.get("max_project_results", 3)
+        rt = self.cfg.get("runtime", {})
+        self.max_history = rt.get("max_history", 10)
+        self.max_steps = rt.get("max_steps", 10)
+        self.max_tool_output = rt.get("max_tool_output_chars", 8000)
+        self.memory_distance_threshold = rt.get("memory_distance_threshold", 0.5)
+        self.max_memory_results = rt.get("max_memory_results", 3)
+        self.max_project_results = rt.get("max_project_results", 3)
 
-    # ── Context Builder ──────────────────────────────────────────────────
-
-    def build_context(self, user_input: str) -> dict:
-        return {
-            "history": self._trim_history(),
-            "memory": self._query_memory(user_input),
-            "project": self._query_project(user_input),
+        temps = rt.get("temperatures", {})
+        self.temps = {
+            "chat": temps.get("chat", 0.6),
+            "work": temps.get("work", 0.0),
+            "research": temps.get("research", 0.2),
         }
 
-    def _trim_history(self) -> str:
-        if not self.history:
-            return "(no previous conversation)"
-        recent = self.history[-self.max_history:]
-        lines = [f"User: {u}\nCozmo: {a}" for u, a in recent]
-        return "\n".join(lines)
+        # which tools each mode may call (None = all registered tools)
+        self._tool_gate = rt.get("tool_gate", {
+            "chat": [],
+            "research": ["web_search", "web_search_pipeline", "web_fetch", "calculator"],
+            "work": None,
+        })
+
+        self._perms = PermissionResolver(self.cfg)
+        self._permission_callback = None  # UI hook: (tool, args) -> bool
+        self._lc_tools = self._build_lc_tools()
+
+    def set_permission_callback(self, callback):
+        """callback(tool_name, args) -> bool. Set by the TUI/CLI layer for 'ask' rules."""
+        self._permission_callback = callback
+
+    # ── langchain tool wrappers ──────────────────────────────────────────
+
+    def _build_lc_tools(self) -> dict:
+        """Wrap registry functions as StructuredTools (schema from signatures)."""
+        wrapped = {}
+        for name, fn in self.tools.items():
+            try:
+                doc = (fn.__doc__ or f"{name} tool").strip()
+                wrapped[name] = StructuredTool.from_function(
+                    func=fn, name=name, description=doc.split("\n")[0]
+                )
+            except Exception:
+                continue
+        return wrapped
+
+    def _tools_for_mode(self, mode: str) -> list:
+        allowed = self._tool_gate.get(mode, None)
+        if allowed is None:
+            return list(self._lc_tools.values())
+        return [self._lc_tools[n] for n in allowed if n in self._lc_tools]
+
+    # ── context ──────────────────────────────────────────────────────────
+
+    def _history_messages(self) -> list:
+        msgs = []
+        for user, assistant in self.history[-self.max_history:]:
+            msgs.append(HumanMessage(content=user))
+            msgs.append(AIMessage(content=assistant))
+        return msgs
 
     def _query_memory(self, user_input: str) -> str:
         if not self.memory:
-            return "(no memories)"
+            return ""
         try:
             results = self.memory.query(user_input, k=self.max_memory_results * 2)
             if not results:
-                return "(no memories)"
-
-            filtered = []
-            for r in results:
-                dist = r.get("distance", 0)
-                if dist < self.memory_distance_threshold:
-                    filtered.append(r)
+                return ""
+            filtered = [r for r in results
+                        if r.get("distance", 0) < self.memory_distance_threshold]
             filtered = filtered[:self.max_memory_results]
-
             if not filtered:
-                return "(no relevant memories)"
+                return ""
             return "\n".join(f"- {r['text']}" for r in filtered)
         except Exception:
-            return "(memory unavailable)"
+            return ""
 
     def _query_project(self, user_input: str) -> str:
         if not self.project_index:
-            return "(no project context)"
+            return ""
         try:
-            raw = self.project_index.query(user_input, k=self.max_project_results)
-            if not raw:
-                return "(no project context)"
-            return raw
+            return self.project_index.query(user_input, k=self.max_project_results) or ""
         except Exception:
-            return "(project context unavailable)"
+            return ""
 
-    # ── Classify + Tool Gate (single LLM call) ───────────────────────────
+    def _system_prompt(self, user_input: str, mode: str,
+                       grounding: str = "") -> str:
+        parts = [_IDENTITY.format(date=datetime.now().strftime("%A, %B %d, %Y"))]
+        parts.append(_MODE_DISCIPLINE.get(mode, _MODE_DISCIPLINE["chat"]))
 
-    def classify_and_gate(self, user_input: str, context: dict) -> dict:
-        prompt = (
-            f"Conversation so far:\n{context['history']}\n\n"
-            f"User request: {user_input}"
-        )
-        raw = self.llm.invoke(prompt, system_prompt=_CLASSIFY_AND_GATE_PROMPT)
-        return self._parse_gate(raw)
+        if self._summary:
+            parts.append(f"\nContext from earlier in this session:\n{self._summary}")
 
-    def _parse_gate(self, raw: str) -> dict:
-        if not raw:
-            return self._default_gate("CHAT")
-        raw = raw.strip()
-        match = re.search(r"\{.*\}", raw, re.DOTALL)
-        if not match:
-            return self._default_gate("CHAT")
-        try:
-            gate = json.loads(match.group())
-            mode = gate.get("mode", "CHAT")
-            if mode not in ("CHAT", "WORK", "RESEARCH"):
-                mode = "CHAT"
-            tools = gate.get("tools", [])
-            if not isinstance(tools, list):
-                tools = []
-            tools = tools[:self.max_tool_calls]
-            return {
-                "mode": mode,
-                "use_tools": gate.get("use_tools", False) and len(tools) > 0,
-                "tools": tools,
-                "reason": gate.get("reason", ""),
-            }
-        except json.JSONDecodeError:
-            return self._default_gate("CHAT")
+        memory = self._query_memory(user_input)
+        if memory:
+            parts.append(f"\nRelevant memory from past sessions:\n{memory}")
 
-    def _default_gate(self, mode: str) -> dict:
-        return {"mode": mode, "use_tools": False, "tools": [], "reason": "parse fallback"}
+        if mode == "work":
+            project = self._query_project(user_input)
+            if project:
+                parts.append(f"\nRelevant project context:\n{project}")
 
-    # ── Tool Execution ───────────────────────────────────────────────────
+        if grounding:
+            parts.append(
+                "\nSearch results for the user's question (use these as your "
+                f"primary source):\n{grounding}"
+            )
 
-    def execute_tools(self, gate: dict) -> list[dict]:
-        if not gate.get("use_tools"):
-            return []
-        tool_calls = gate.get("tools", [])[:self.max_tool_calls]
-        results = []
-        for call in tool_calls:
-            name = call.get("name", "")
-            args = call.get("args", {})
+        return "\n\n".join(parts)
+
+    # ── routing ──────────────────────────────────────────────────────────
+
+    def _route(self, user_input: str) -> str:
+        recent = "\n".join(
+            f"User: {u}\nCozmo: {a[:200]}" for u, a in self.history[-3:]
+        ) or "(none)"
+        raw = self.router_llm.invoke(
+            _ROUTE_PROMPT.format(history=recent, text=user_input)
+        ).strip().lower()
+        for mode in ("work", "research", "chat"):
+            if mode in raw:
+                return mode
+        return "chat"
+
+    # ── forced grounding search (research mode) ──────────────────────────
+
+    def _grounding_search(self, user_input: str) -> str:
+        """Deterministically run one search before the loop. Small models
+        skip tools and hallucinate current events if given the choice."""
+        for name in _SEARCH_TOOL_PREFERENCE:
             fn = self.tools.get(name)
             if fn is None:
-                results.append({"tool": name, "output": f"Error: unknown tool '{name}'", "args": args})
                 continue
             try:
-                raw_output = str(fn(**args))
+                return self._sanitize(str(fn(query=user_input)))
             except Exception as e:
-                raw_output = f"Error: {e}"
-            sanitized = self._sanitize_output(raw_output)
-            results.append({"tool": name, "output": sanitized, "args": args})
-        return results
+                return f"(search failed: {e})"
+        return ""
 
-    def _sanitize_output(self, text: str) -> str:
+    # ── tool call extraction (native + text fallback) ────────────────────
+
+    def _extract_calls(self, ai) -> list[dict]:
+        native = getattr(ai, "tool_calls", None)
+        if native:
+            return [{"name": c["name"], "args": c.get("args", {}),
+                     "id": c.get("id") or c["name"]} for c in native]
+        return self._parse_text_toolcall(getattr(ai, "content", "") or "")
+
+    def _parse_text_toolcall(self, content: str) -> list[dict]:
+        """Fallback: some models emit {"name":..,"arguments":..} as plain text."""
+        if "{" not in content:
+            return []
+        match = _TEXT_TOOLCALL_RE.search(content)
+        if not match:
+            return []
+        try:
+            obj = json.loads(match.group())
+        except json.JSONDecodeError:
+            return []
+        name = obj.get("name") or obj.get("tool")
+        args = obj.get("arguments") or obj.get("args") or {}
+        if name in self._lc_tools and isinstance(args, dict):
+            return [{"name": name, "args": args, "id": name}]
+        return []
+
+    # ── tool execution ───────────────────────────────────────────────────
+
+    def _check_permission(self, name: str, args: dict) -> bool:
+        decision = self._perms.resolve(name, args, agent="cozmo")
+        if decision == "allow":
+            return True
+        if decision == "deny":
+            return False
+        # 'ask' — defer to the UI layer; no UI hook means deny (fail safe)
+        if self._permission_callback:
+            return self._permission_callback(name, args)
+        return False
+
+    def _exec_tool(self, name: str, args: dict) -> str:
+        fn = self.tools.get(name)
+        if fn is None:
+            known = ", ".join(sorted(self.tools))
+            return f"Error: unknown tool '{name}'. Available tools: {known}"
+        if not self._check_permission(name, args):
+            return (f"Error: the user DENIED permission for {name}. Do not retry "
+                    f"this call — explain what you wanted to do and ask the user.")
+        try:
+            raw = str(fn(**args))
+        except TypeError as e:
+            return f"Error: bad arguments for {name}: {e}. Check the tool schema and retry."
+        except Exception as e:
+            raw = f"Error: {e}"
+        return self._sanitize(raw)
+
+    def _sanitize(self, text: str) -> str:
         if len(text) > self.max_tool_output:
             head = self.max_tool_output // 3
             tail = self.max_tool_output - head
-            text = text[:head] + f"\n... [{len(text) - self.max_tool_output} chars truncated] ...\n" + text[-tail:]
-        for pattern in _COMPILE_STRIP_PATTERNS:
-            text = pattern.sub("", text)
+            text = (text[:head]
+                    + f"\n... [{len(text) - self.max_tool_output} chars truncated] ...\n"
+                    + text[-tail:])
         return text
 
-    # ── Response Generation ──────────────────────────────────────────────
-
-    def generate(self, user_input: str, context: dict, tool_results: list[dict], mode: str) -> str:
-        mode_instructions = _MODE_INSTRUCTIONS.get(mode, _MODE_INSTRUCTIONS["CHAT"])
-
-        if tool_results:
-            tool_text = "\n\n".join(
-                f"[Tool: {r['tool']}]\n{r['output']}" for r in tool_results
-            )
-        else:
-            tool_text = "(no tools used)"
-
-        prompt = _GENERATE_PROMPT.format(
-            mode=mode,
-            mode_instructions=mode_instructions,
-            history=context["history"],
-            memory=context["memory"],
-            project=context["project"],
-            user_input=user_input,
-            tool_results=tool_text,
-        )
-        return self.llm.invoke(prompt)
-
-    # ── Response Compiler ────────────────────────────────────────────────
-
-    def compile(self, draft: str, mode: str = "CHAT") -> str:
-        text = draft
-        for pattern in _COMPILE_STRIP_PATTERNS:
-            text = pattern.sub("", text)
-        text = re.sub(r"^(Cozmo:\s*)+", "", text, flags=re.MULTILINE)
-        text = re.sub(r"\n{3,}", "\n\n", text)
-        return text.strip()
-
-    # ── Main Pipeline ────────────────────────────────────────────────────
-
-    def run(self, user_input: str) -> str:
-        try:
-            context = self.build_context(user_input)
-            gate = self.classify_and_gate(user_input, context)
-            tool_results = self.execute_tools(gate)
-            draft = self.generate(user_input, context, tool_results, gate["mode"])
-            final = self.compile(draft, gate["mode"])
-            self.history.append((user_input, final))
-            self._trim_history_inplace()
-            return final
-        except Exception as e:
-            return self.compile(f"I hit an error: {e}")
-
-    # ── Hybrid Streaming ─────────────────────────────────────────────────
+    # ── main streaming loop ──────────────────────────────────────────────
 
     def run_stream(self, user_input: str):
         """Yield (kind, text) tuples. kind is 'token', 'thinking', or 'status'."""
         try:
-            context = self.build_context(user_input)
-            yield ("status", "Classifying...")
-
-            gate = self.classify_and_gate(user_input, context)
-            mode = gate["mode"]
+            yield ("status", "Routing...")
+            mode = self._route(user_input)
             yield ("thinking", f"Mode: {mode}")
 
-            tool_results = []
-            if gate.get("use_tools"):
-                tool_names = [t.get("name", "?") for t in gate.get("tools", [])]
-                yield ("thinking", f"Tools: {', '.join(tool_names)}")
-                tool_results = self.execute_tools(gate)
-                yield ("thinking", "Generating response...")
+            grounding = ""
+            if mode == "research":
+                yield ("thinking", "Searching...")
+                grounding = self._grounding_search(user_input)
 
-            mode_instructions = _MODE_INSTRUCTIONS.get(mode, _MODE_INSTRUCTIONS["CHAT"])
-            if tool_results:
-                tool_text = "\n\n".join(
-                    f"[Tool: {r['tool']}]\n{r['output']}" for r in tool_results
-                )
+            temp = self.temps.get(mode, 0.0)
+            lc_tools = self._tools_for_mode(mode)
+            runnable = (self.llm.bind_tools(lc_tools, temperature=temp)
+                        if lc_tools else self.llm.client(temp))
+
+            msgs = [SystemMessage(content=self._system_prompt(user_input, mode, grounding))]
+            msgs += self._history_messages()
+            msgs.append(HumanMessage(content=user_input))
+
+            final = ""
+            seen_calls: set[str] = set()  # break identical-call loops
+            for step in range(self.max_steps):
+                acc = None
+                content_buf = ""
+                suppress = False
+                streamed = False
+
+                for chunk in runnable.stream(msgs):
+                    acc = chunk if acc is None else acc + chunk
+                    piece = chunk.content or ""
+                    if piece:
+                        content_buf += piece
+                        # suppress content that looks like a text-fallback tool call
+                        if not streamed and not suppress:
+                            if content_buf.lstrip()[:1] == "{":
+                                suppress = True
+                        if not suppress:
+                            streamed = True
+                            yield ("token", piece)
+
+                ai = acc if acc is not None else AIMessage(content=content_buf)
+                calls = self._extract_calls(ai)
+
+                if not calls:
+                    # false-positive suppression: JSON-looking content that
+                    # wasn't a real tool call — surface it after all.
+                    if suppress and not streamed:
+                        yield ("token", content_buf)
+                    final = content_buf.strip()
+                    break
+
+                # model wants tools: record the turn, run them, feed results back
+                msgs.append(ai if isinstance(ai, AIMessage)
+                            else AIMessage(content=content_buf))
+                names = ", ".join(c["name"] for c in calls)
+                yield ("thinking", f"Running: {names}")
+
+                for c in calls:
+                    sig = f"{c['name']}:{json.dumps(c['args'], sort_keys=True, default=str)}"
+                    if sig in seen_calls:
+                        out = (f"Error: you already made this exact {c['name']} call "
+                               f"and have its result above. Use it, or try a "
+                               f"DIFFERENT call — do not repeat yourself.")
+                    else:
+                        seen_calls.add(sig)
+                        out = self._exec_tool(c["name"], c["args"])
+                    msgs.append(ToolMessage(content=out, tool_call_id=c["id"]))
+                yield ("thinking", "Thinking...")
             else:
-                tool_text = "(no tools used)"
+                # exhausted max_steps without a final answer
+                final = ("I ran out of steps before finishing. Here's where I "
+                         "got to — ask me to continue if you want me to keep going.")
+                yield ("token", final)
 
-            prompt = _GENERATE_PROMPT.format(
-                mode=mode,
-                mode_instructions=mode_instructions,
-                history=context["history"],
-                memory=context["memory"],
-                project=context["project"],
-                user_input=user_input,
-                tool_results=tool_text,
-            )
+            if not final:
+                final = "(no response — the model returned empty output; try rephrasing)"
+                yield ("token", final)
 
-            buffer = ""
-            in_tool_block = False
-            full_response = ""
-
-            for token in self.llm.stream(prompt):
-                buffer += token
-                full_response += token
-
-                if not in_tool_block:
-                    if "<tool>" in buffer or "<web_search>" in buffer or "<web_fetch>" in buffer:
-                        in_tool_block = True
-                        continue
-                    yield ("token", token)
-                else:
-                    if "</tool>" in buffer or "</web_search>" in buffer or "</web_fetch>" in buffer:
-                        in_tool_block = False
-                        buffer = ""
-                        continue
-
-            final = self.compile(full_response, mode)
-            self.history.append((user_input, final))
-            self._trim_history_inplace()
-
-            if final != full_response.strip():
-                yield ("token", final[len(full_response.strip()):])
+            self._remember(user_input, final)
 
         except Exception as e:
-            yield ("token", self.compile(f"I hit an error: {e}"))
+            msg = f"I hit an error: {e}"
+            yield ("token", msg)
+            self._remember(user_input, msg)
 
-    def _trim_history_inplace(self):
-        while len(self.history) > self.max_history:
-            self.history.pop(0)
+    def run(self, user_input: str) -> str:
+        """Synchronous run. Returns the final answer text."""
+        chunks = []
+        for kind, text in self.run_stream(user_input):
+            if kind == "token":
+                chunks.append(text)
+        return "".join(chunks).strip()
+
+    # ── persistence + compaction ─────────────────────────────────────────
+
+    def _remember(self, user_input: str, final: str):
+        self.history.append((user_input, final))
+        if len(self.history) > self.max_history:
+            self._compact()
+        if self.memory and hasattr(self.memory, "add_interaction"):
+            try:
+                self.memory.add_interaction(user_input, final)
+            except Exception:
+                pass
+
+    def _compact(self):
+        """Summarize the older half of history into a context note instead of
+        dropping it. Keeps long sessions coherent within a small ctx window."""
+        keep = self.max_history // 2
+        old, self.history = self.history[:-keep], self.history[-keep:]
+        text = "\n".join(f"User: {u}\nCozmo: {a}" for u, a in old)
+        if self._summary:
+            text = f"Earlier context:\n{self._summary}\n\n{text}"
+        try:
+            summary = self.router_llm.invoke(_COMPACT_PROMPT.format(text=text))
+            if summary and not summary.lower().startswith("error"):
+                self._summary = summary.strip()
+        except Exception:
+            pass
+
+    def reset(self):
+        """Clear conversation state (new chat)."""
+        self.history.clear()
+        self._summary = ""
 
     def swap_model(self, model_name: str):
-        """Swap the LLM to a different model."""
         self.llm.swap_model(model_name)

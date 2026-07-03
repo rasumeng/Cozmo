@@ -16,7 +16,7 @@ from ...memory.manager import MemoryManager
 from ...code_indexer import ProjectIndex
 from ... import config
 from .model_selector import ModelSelectorScreen
-from .permission import PermissionModal
+from .permission import PermissionModal, PermissionBridge
 
 
 class MainScreen(Screen):
@@ -31,10 +31,12 @@ class MainScreen(Screen):
         ollama_url = cfg.get("ollama", {}).get("url", "http://localhost:11434")
 
         classifier_model = cfg.get("models", {}).get("classifier", "qwen3:0.6b")
-        llm = OllamaModel(classifier_model, ollama_url)
+        chat_model = cfg.get("models", {}).get("chat", "qwen2.5:7b")
+        llm = OllamaModel(chat_model, ollama_url)
+        router_llm = OllamaModel(classifier_model, ollama_url)
 
         memory = MemoryManager(
-            llm,
+            router_llm,  # cheap model for summaries
             persist_dir=str(Path.home() / ".cozmo" / "memory"),
         )
 
@@ -45,6 +47,14 @@ class MainScreen(Screen):
             memory=memory,
             project_index=project_index,
             cfg=cfg,
+            router_llm=router_llm,
+        )
+
+        # route 'ask' permission decisions to the TUI modal (blocks the
+        # worker thread, not the UI thread)
+        self._perm_bridge = PermissionBridge(self.app)
+        self.runtime.set_permission_callback(
+            lambda tool, args: self._perm_bridge.ask(tool, args, "cozmo")
         )
 
         self.chat_manager = ChatManager(

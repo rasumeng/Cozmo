@@ -17,11 +17,17 @@ DEFAULT_CONFIG = {
     "memory": {"max_turns_before_summary": 5, "max_short_term_pairs": 10},
     "runtime": {
         "max_history": 10,
-        "max_tool_calls": 3,
+        "max_steps": 8,
         "max_tool_output_chars": 8000,
         "memory_distance_threshold": 0.5,
         "max_memory_results": 3,
         "max_project_results": 3,
+        "temperatures": {"chat": 0.6, "work": 0.0, "research": 0.2},
+        "tool_gate": {
+            "chat": [],
+            "research": ["web_search", "web_search_pipeline", "web_fetch", "calculator"],
+            # "work": omitted => all registered tools
+        },
     },
     "agents": {
         "primary": ["build", "plan"],
