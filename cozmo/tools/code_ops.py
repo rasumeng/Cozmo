@@ -40,18 +40,45 @@ def grep_search(pattern: str, path: str = ".") -> str:
 
 @register_tool()
 def run_command(command: str) -> str:
-    """Execute a shell command."""
-    result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=120)
-    out = result.stdout
-    if result.stderr:
-        out += f"\nSTDERR:\n{result.stderr}"
-    return out[-10000:] or "(no output)"
+    """Execute a shell command safely. Pipes and redirects allowed."""
+    import shlex
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        parts = command.split()
+
+    blocked = {"rm", "del", "format", "shutdown", "reboot", "mkfs", "dd"}
+    if parts and parts[0].lower() in blocked:
+        return f"Error: command '{parts[0]}' is blocked for safety"
+
+    try:
+        result = subprocess.run(
+            parts,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        out = result.stdout
+        if result.stderr:
+            out += f"\nSTDERR:\n{result.stderr}"
+        if len(out) > 10000:
+            head = out[:2000]
+            tail = out[-8000:]
+            out = f"{head}\n... [{len(out) - 10000} chars truncated] ...\n{tail}"
+        return out or "(no output)"
+    except Exception as e:
+        return f"Error: {e}"
 
 @register_tool()
 def git_diff() -> str:
     """Show unstaged git diff."""
     result = subprocess.run(["git", "diff"], capture_output=True, text=True, timeout=30)
-    return result.stdout[-10000:] or "(no unstaged changes)"
+    out = result.stdout or "(no unstaged changes)"
+    if len(out) > 10000:
+        head = out[:2000]
+        tail = out[-8000:]
+        out = f"{head}\n... [{len(out) - 10000} chars truncated] ...\n{tail}"
+    return out
 
 
 @register_tool()

@@ -250,6 +250,19 @@ ChatInput {
     width: 1fr;
 }
 
+.model-btn {
+    width: auto;
+    height: auto;
+    padding: 0 2;
+    content-align: center middle;
+    color: $foreground 70%;
+    background: transparent;
+}
+
+.model-btn:hover {
+    background: $primary 20%;
+}
+
 .sprite {
     align: center middle;
     height: auto;
@@ -268,4 +281,120 @@ ChatInput {
     text-align: center;
     color: $text;
     padding: 1 4;
+}
+
+/* ========================================
+   CHAT MESSAGES
+   ======================================== */
+.chat-msg {
+    width: 100%;
+    height: auto;
+    padding: 0 2;
+    margin: 0 0;
+    color: $foreground;
+}
+
+.chat-thinking {
+    width: 100%;
+    height: auto;
+    padding: 0 2;
+    color: $foreground 50%;
+    text-style: italic;
+}
+
+.sidebar-item:hover {
+    background: $primary 20%;
+}
+
+/* ========================================
+   MODEL SELECTOR MODAL
+   ======================================== */
+
+#model-dialog {
+    width: 40;
+    height: auto;
+    max-height: 30;
+    padding: 2 4;
+    background: $surface;
+    border: thick $primary;
+}
+
+#model-title {
+    text-style: bold;
+    content-align: center middle;
+    height: 3;
+}
+
+#model-list {
+    height: auto;
+    max-height: 20;
+    overflow-y: scroll;
+}
+
+.model-item {
+    height: auto;
+    padding: 0 1;
+    width: 100%;
+}
+
+.model-item:hover {
+    background: $primary 20%;
+}
+
+.model-item-selected {
+    color: $accent;
+}
+
+#close-models {
+    width: 100%;
+    margin-top: 1;
+}
+
+/* ========================================
+   PERMISSION MODAL
+   ======================================== */
+
+#perm-dialog {
+    width: 50;
+    height: auto;
+    padding: 2 4;
+    background: $surface;
+    border: thick $warning;
+}
+
+#perm-title {
+    text-style: bold;
+    content-align: center middle;
+    height: 3;
+    color: $warning;
+}
+
+#perm-details {
+    height: auto;
+    margin: 1 0;
+}
+
+.perm-row {
+    height: auto;
+    padding: 0 1;
+}
+
+#perm-buttons {
+    layout: horizontal;
+    height: auto;
+    margin-top: 1;
+}
+
+#perm-buttons Button {
+    margin: 0 1;
+}
+
+/* ========================================
+   THINKING STATUS
+   ======================================== */
+
+.chat-thinking {
+    color: $foreground 50%;
+    text-style: italic;
+    padding: 0 1;
 }

@@ -16,7 +16,7 @@ class CozmoApp(App):
         self.push_screen("main")
 
     def on_key(self, event):
-        if event.key == "q":
+        if event.key == "ctrl+q":
             exit()
 
 

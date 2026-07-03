@@ -34,13 +34,14 @@ class ProjectIndex:
             )
         return len(docs)
     
-    def query(self, query: str, k: int  = 5) -> str:
-        """Search project index, return formatted snippets."""
+    def query(self, query: str, k: int = 3) -> str:
+        """Search project index, return concise snippets."""
         results = self.store.similarity_search(query, k=k)
         if not results:
             return ""
         parts = []
         for r in results:
             path = r["metadata"].get("path", "?")
-            parts.append(f"--- {path} ---\n{r['text'][:500]}")
+            text = r["text"][:300]
+            parts.append(f"--- {path} ---\n{text}")
         return "\n".join(parts)

@@ -20,7 +20,12 @@ class ChromaStore:
             ids=ids,
         )
 
-    def similarity_search(self, query: str, k: int = 5) -> list[dict]:
+    def similarity_search(
+        self,
+        query: str,
+        k: int = 5,
+        distance_threshold: float | None = None,
+    ) -> list[dict]:
         count = self.collection.count()
         if count == 0:
             return []
@@ -31,10 +36,13 @@ class ChromaStore:
         docs = results.get("documents", [[]])[0]
         metas = results.get("metadatas", [[]])[0]
         dists = results.get("distances", [[]])[0]
-        return [
+        items = [
             {"text": d, "metadata": m, "distance": dist}
             for d, m, dist in zip(docs, metas, dists)
         ]
+        if distance_threshold is not None:
+            items = [i for i in items if i["distance"] < distance_threshold]
+        return items
 
     def count(self) -> int:
         return self.collection.count()

@@ -40,11 +40,6 @@ class MemoryManager:
         self.short_term = self.short_term[-1:]
         self.turn_count = 0
 
-    def query(self, text: str, k: int = 5) -> str:
-        results = self.chroma.similarity_search(text, k)
-        if not results:
-            return ""
-        lines = ["Relevant past memories:"]
-        for r in results:
-            lines.append(f"- {r['text']}")
-        return "\n".join(lines)
+    def query(self, text: str, k: int = 5, distance_threshold: float = 0.5) -> list[dict]:
+        raw = self.chroma.similarity_search(text, k=k, distance_threshold=distance_threshold)
+        return raw

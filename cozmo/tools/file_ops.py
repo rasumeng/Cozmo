@@ -14,7 +14,7 @@ def _safe_path(path: str) -> Path | None:
 
 @register_tool()
 def read_file(path: str) -> str:
-    """Read contents of a text file."""
+    """Read contents of a text file (capped at 5000 chars)."""
     safe = _safe_path(path)
     if safe is None:
         return "Error: path outside allowed directory"
@@ -23,7 +23,10 @@ def read_file(path: str) -> str:
     if not safe.is_file():
         return "Error: not a file"
     try:
-        return safe.read_text(encoding="utf-8")
+        text = safe.read_text(encoding="utf-8")
+        if len(text) > 5000:
+            return text[:5000] + f"\n... [truncated, {len(text)} total chars]"
+        return text
     except Exception as e:
         return f"Error reading file: {e}"
 

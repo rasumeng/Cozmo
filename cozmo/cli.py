@@ -68,27 +68,46 @@ def _handle_slash(cmd: str) -> tuple[str, bool]:
 
 
 def interactive_session(cfg: dict, initial_query: str | None = None):
-    orch = Orchestrator(cfg)
+    from .core.runtime import CozmoRuntime
+    from .core.llm import OllamaModel
+    from .memory.manager import MemoryManager
+    from .code_indexer import ProjectIndex
+
+    ollama_url = cfg.get("ollama", {}).get("url", "http://localhost:11434")
+    classifier_model = cfg.get("models", {}).get("classifier", "qwen3:0.6b")
+    llm = OllamaModel(classifier_model, ollama_url)
+    memory = MemoryManager(llm, persist_dir=str(Path.home() / ".cozmo" / "memory"))
+    project_index = ProjectIndex(Path.cwd())
+    runtime = CozmoRuntime(llm=llm, memory=memory, project_index=project_index, cfg=cfg)
+
     if initial_query:
-        _safe_print(f"\nCozmo: {orch.run(initial_query)}\n")
+        _safe_print(f"\nCozmo: {runtime.run(initial_query)}\n")
     while True:
         try:
             user = input("\nYou: ")
             if user.lower() in ("exit", "quit"):
                 break
-            result = orch.run(user)
+            result = runtime.run(user)
             _safe_print(f"Cozmo: {result}")
         except (EOFError, KeyboardInterrupt):
             break
 
 
 def coding_session(cfg: dict, project_path: Path, query: str | None = None, auto: bool = False):
-    from .core.agent_registry import AgentRegistry
+    from .core.runtime import CozmoRuntime
+    from .core.llm import OllamaModel
+    from .memory.manager import MemoryManager
+    from .code_indexer import ProjectIndex
 
-    registry = AgentRegistry(project_path, cfg, auto=auto)
+    ollama_url = cfg.get("ollama", {}).get("url", "http://localhost:11434")
+    classifier_model = cfg.get("models", {}).get("classifier", "qwen3:0.6b")
+    llm = OllamaModel(classifier_model, ollama_url)
+    memory = MemoryManager(llm, persist_dir=str(Path.home() / ".cozmo" / "memory"))
+    project_index = ProjectIndex(project_path)
+    runtime = CozmoRuntime(llm=llm, memory=memory, project_index=project_index, cfg=cfg)
 
     if query:
-        _safe_print(f"\nCozmo: {registry.current.run(query)}\n")
+        _safe_print(f"\nCozmo: {runtime.run(query)}\n")
         return
 
     HistoryFile = HISTORY_FILE
@@ -98,9 +117,7 @@ def coding_session(cfg: dict, project_path: Path, query: str | None = None, auto
 
     @kb.add("f2")
     def _(event):
-        registry.switch(1)
-        print(f"\n → switched to {registry.current_name}")
-        status = _status_bar(registry)
+        print(f"\n → switched mode")
         event.app.current_buffer.text = ""
         event.app.invalidate()
 
@@ -111,11 +128,10 @@ def coding_session(cfg: dict, project_path: Path, query: str | None = None, auto
         key_bindings=kb,
     )
 
-    print(f"Session in {project_path}. /help for commands, F2 to switch agents.")
+    print(f"Session in {project_path}. /help for commands, F2 to switch mode.")
     while True:
         try:
-            status = _status_bar(registry)
-            line = session.prompt(f"\n{status}\nYou: ")
+            line = session.prompt(f"\nYou: ")
         except (EOFError, KeyboardInterrupt):
             break
 
@@ -138,31 +154,21 @@ def coding_session(cfg: dict, project_path: Path, query: str | None = None, auto
                 break
             cmd = cmd_raw
             if cmd in ("new", "clear"):
-                registry.switch(0)
-                registry = AgentRegistry(project_path, cfg)
+                runtime = CozmoRuntime(llm=llm, memory=memory, project_index=project_index, cfg=cfg)
                 print("Session cleared.")
-            elif cmd == "agent":
-                print(f"Current agent: {registry.current_name}")
-            elif cmd == "agents":
-                for name, idx in registry.list():
-                    mark = " ←" if idx == registry._current else ""
-                    print(f"  {idx + 1}. {name}{mark}")
+            elif cmd == "compact":
+                runtime.history.clear()
+                print("History cleared.")
             elif cmd == "help":
                 print(
                     "Commands:\n"
                     "  /help           Show this help\n"
                     "  /new            Clear session\n"
                     "  /exit           Quit\n"
-                    "  /compact        Summarize & compact context\n"
-                    "  /agent          Show current agent\n"
-                    "  /agents         List all agents\n"
+                    "  /compact        Clear history\n"
                     "  @file           Attach file to context\n"
-                    "  !command        Run shell command\n"
-                    "  F2              Switch agent"
+                    "  !command        Run shell command"
                 )
-            elif cmd == "compact":
-                registry.current.compact()
-                print("Context compacted.")
             else:
                 print(f"Unknown: /{cmd}")
             continue
@@ -170,21 +176,31 @@ def coding_session(cfg: dict, project_path: Path, query: str | None = None, auto
         if not line.strip():
             continue
 
-        result = registry.current.run(line)
+        result = runtime.run(line)
         _safe_print(f"Cozmo: {result}")
 
 
 def run_telegram(cfg: dict):
     from .telegram_bot import TelegramBot
     from .tools.telegram import set_bot_instance
+    from .core.runtime import CozmoRuntime
+    from .core.llm import OllamaModel
+    from .memory.manager import MemoryManager
+    from .code_indexer import ProjectIndex
 
     token = cfg.get("telegram", {}).get("bot_token", "")
     if not token:
         print("Error: telegram.bot_token not set in config")
         return
 
-    orch = Orchestrator(cfg)
-    bot = TelegramBot(token, orch)
+    ollama_url = cfg.get("ollama", {}).get("url", "http://localhost:11434")
+    classifier_model = cfg.get("models", {}).get("classifier", "qwen3:0.6b")
+    llm = OllamaModel(classifier_model, ollama_url)
+    memory = MemoryManager(llm, persist_dir=str(Path.home() / ".cozmo" / "memory"))
+    project_index = ProjectIndex(Path.cwd())
+    runtime = CozmoRuntime(llm=llm, memory=memory, project_index=project_index, cfg=cfg)
+
+    bot = TelegramBot(token, runtime)
     set_bot_instance(bot)
     print("Cozmo Telegram bot started. Press Ctrl+C to stop.")
     bot.run()
@@ -197,16 +213,16 @@ def main():
     sub.add_parser("init", help="Generate ~/.cozmo/config.toml")
     sub.add_parser("telegram", help="Run Cozmo as Telegram bot")
 
-    run_parser = sub.add_parser("run", help="Run a query or start interactive")
+    run_parser = sub.add_parser("run", help="[DEPRECATED: use 'tui'] Run a query or start interactive")
     run_parser.add_argument("query", nargs="?", help="Single query (omit for interactive)")
 
-    code_parser = sub.add_parser("code", help="Start a coding session")
+    code_parser = sub.add_parser("code", help="[DEPRECATED: use 'tui'] Start a coding session")
     code_parser.add_argument("query", nargs="?", help="Single query (omit for interactive)")
     code_parser.add_argument("--path", default=".", help="Project directory")
     code_parser.add_argument("--init", action="store_true", help="Index project into Chroma")
     code_parser.add_argument("--auto", action="store_true", help="Non-interactive — allow all permission prompts")
 
-    sub.add_parser("tui", help="Launch the Textual TUI")
+    sub.add_parser("tui", help="Launch the Textual TUI (primary interface)")
 
     config_parser = sub.add_parser("config", help="Manage configuration")
     config_parser.add_argument("action", choices=["show", "set", "reset"], nargs="?")
@@ -240,8 +256,25 @@ def main():
         coding_session(cfg, project_path, args.query, auto=args.auto)
 
     elif args.command == "tui":
+        from .ollama_util import is_ollama_running, start_ollama, stop_ollama, wait_for_ollama
         from .tui.app import CozmoApp
-        CozmoApp().run()
+
+        proc, started = None, False
+        if not is_ollama_running():
+            print("Starting Ollama...")
+            proc = start_ollama()
+            if proc:
+                started = True
+                if not wait_for_ollama():
+                    print("Warning: Ollama didn't respond in time. It may still be starting.")
+            else:
+                print("Continuing without Ollama.")
+
+        try:
+            CozmoApp().run()
+        finally:
+            if started:
+                stop_ollama(proc)
 
     elif args.command == "config":
         from .config_cli import handle_config

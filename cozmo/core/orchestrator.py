@@ -1,3 +1,6 @@
+# DEPRECATED: Use cozmo.core.runtime.CozmoRuntime instead.
+# This file is kept for backward compatibility only.
+
 import re
 from pathlib import Path
 from .llm import OllamaModel

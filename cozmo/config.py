@@ -7,14 +7,22 @@ CONFIG_PATH = CONFIG_DIR / "config.toml"
 
 DEFAULT_CONFIG = {
     "models": {
-        "classifier": "qwen3:0.6b",
-        "chat": "phi4-mini:3.8b",
+        "classifier": "phi4-mini:3.8b",
+        "chat": "qwen2.5:7b",
         "coder": "ornith:9b",
         "vision": "qwen2.5vl:7b",
         "research": "qwen3:8b",
     },
     "ollama": {"url": "http://localhost:11434"},
     "memory": {"max_turns_before_summary": 5, "max_short_term_pairs": 10},
+    "runtime": {
+        "max_history": 10,
+        "max_tool_calls": 3,
+        "max_tool_output_chars": 8000,
+        "memory_distance_threshold": 0.5,
+        "max_memory_results": 3,
+        "max_project_results": 3,
+    },
     "agents": {
         "primary": ["build", "plan"],
         "build": {"model": None, "permissions": {}},

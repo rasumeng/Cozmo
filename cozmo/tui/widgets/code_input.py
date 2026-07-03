@@ -14,6 +14,11 @@ class CodeInput(Vertical):
             self.mode = mode
             super().__init__()
 
+    class MessageSent(Message):
+        def __init__(self, content: str) -> None:
+            self.content = content
+            super().__init__()
+
     modes = ["Build", "Plan"]
     current_mode_index = 0
 
@@ -27,8 +32,24 @@ class CodeInput(Vertical):
             event.stop()
             self._toggle_mode()
 
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "code-input-field" and event.value.strip():
+            self.post_message(self.MessageSent(event.value.strip()))
+            event.input.value = ""
+
     def _toggle_mode(self) -> None:
         self.current_mode_index = (self.current_mode_index + 1) % 2
         mode = self.modes[self.current_mode_index]
-        self.query_one("#code-mode-label", Static).update(f"{mode}  (coding model)")
+        self._update_mode_label(mode)
         self.post_message(self.ToggleMode(mode))
+
+    def _update_mode_label(self, mode: str) -> None:
+        try:
+            self.query_one("#code-mode-label", Static).update(f"{mode}  (coding model)")
+        except Exception:
+            pass
+
+    def set_mode(self, mode: str) -> None:
+        if mode in self.modes:
+            self.current_mode_index = self.modes.index(mode)
+            self._update_mode_label(mode)
