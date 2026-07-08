@@ -12,9 +12,28 @@ DEFAULT_CONFIG = {
         "coder": "ornith:9b",
         "vision": "qwen2.5vl:7b",
         "research": "qwen3:8b",
+        "max_tokens": 2048,
     },
     "ollama": {"url": "http://localhost:11434"},
     "memory": {"max_turns_before_summary": 5, "max_short_term_pairs": 10},
+    "router": {
+        "use_llm": False,
+    },
+    "workspace": {
+        "path": "./workspace",
+        "knowledge": "./knowledge",
+        "git_repo": "",
+    },
+    "search": {
+        "url": "http://localhost:8080",
+    },
+    "mcp": {
+        "servers": {},
+    },
+    "context": {
+        "max_history": 20,
+        "tool_response_max_chars": 2000,
+    },
     "runtime": {
         "max_history": 10,
         "max_steps": 8,
@@ -26,7 +45,6 @@ DEFAULT_CONFIG = {
         "tool_gate": {
             "chat": [],
             "research": ["web_search", "web_search_pipeline", "web_fetch", "calculator"],
-            # "work": omitted => all registered tools
         },
     },
     "agents": {

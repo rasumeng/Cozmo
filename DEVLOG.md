@@ -784,3 +784,48 @@ Agent thread calls permission_callback(tool, args, agent)
 **Verified**:
 - All imports clean ✅
 - `cozmo tui --help` works ✅
+
+---
+
+### 2026-07-08 — CozmoBrain integration
+
+**Context**: Merged the standalone [CozmoBrain](https://github.com/rasumeng/CozmoBrain) repo into main Cozmo codebase. Brain had a more sophisticated tool routing system (keyword + domain priority + LLM fallback), MCP server support, context management utilities, date-aware prompt builder, and additional tools (execute_python sandbox, knowledge CRUD with OKF frontmatter, date-stamped web search).
+
+**New files** (per [IMPLEMENT_PLAN.md](https://github.com/rasumeng/CozmoBrain/blob/main/IMPLEMENT_PLAN.md)):
+- `cozmo/core/mcp_host.py` — MCPHost: stdio sessions, connect/disconnect, tool wrapper factory
+- `cozmo/core/router.py` — ToolRouter: keyword → domain priority → LLM fallback classification, 10 categories inlined
+- `cozmo/core/context.py` — `trim_history`, `truncate_tool_responses`, `compact_messages`, `estimate_tokens`
+- `cozmo/core/prompts.py` — `build_system_prompt()` with live tool list + date injection
+- `cozmo/docker/sandbox.Dockerfile` — sandboxed Python execution via Docker
+
+**Modified files**:
+- `cozmo/core/__init__.py` — exports MCPHost, ToolRouter, StatelessLLM, build_system_prompt, context utils
+- `cozmo/core/llm.py` — added `StatelessLLM` (langchain-based, for ToolRouter classifier)
+- `cozmo/tools/code_ops.py` — added `execute_python` with Docker → subprocess fallback
+- `cozmo/tools/web_search.py` — added `fetch_url`, date-stamped `web_search` results
+- `cozmo/tools/file_ops.py` — added `read_knowledge` / `write_knowledge` with OKF frontmatter
+- `cozmo/cli.py` — added `cozmo mcp connect|list|disconnect` subcommand
+- `cozmo/config.py` — added `router`, `workspace`, `search`, `mcp`, `context` config sections
+- `pyproject.toml` — added `mcp>=1.0`, `pyyaml` dependencies
+- `.gitignore` — added `.cozmo/`, `workspace/`, `knowledge/`, `test_brain_integration.py`
+
+**Design decisions**:
+- `rules.yaml` → inlined as `ToolRouter.CATEGORIES` class dict (no YAML at runtime)
+- Brain's `pydantic_ai` → Cozmo's `OllamaModel` via `StatelessLLM` wrapper (no new framework)
+- `config.yaml` → merged into TOML defaults in `config.py`
+- All new tools use existing `@register_tool()` decorator → auto-in `TOOL_REGISTRY`
+- Docker fallback: if Docker unavailable or sandbox build fails, falls through to subprocess
+
+**Verified** (14/14 tests pass):
+- All imports resolve ✅
+- 20 tools in TOOL_REGISTRY (4 new) ✅
+- ToolRouter classify returns matching categories ✅
+- ToolRouter no-match returns None (safe) ✅
+- build_system_prompt injects date + tool list ✅
+- context utils (trim, truncate, estimate) work ✅
+- StatelessLLM instantiates cleanly ✅
+- Config defaults include new sections ✅
+- MCPHost instantiates cleanly ✅
+- execute_python("print('hello')") → "hello" ✅
+- fetch_url("http://example.com") → page text ✅
+- read_knowledge missing file → error (safe) ✅

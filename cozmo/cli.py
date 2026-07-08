@@ -245,6 +245,10 @@ def main():
     config_parser.add_argument("key", nargs="?", help="Config key (e.g. models.coder)")
     config_parser.add_argument("value", nargs="?", help="Config value")
 
+    mcp_parser = sub.add_parser("mcp", help="Manage MCP server connections")
+    mcp_parser.add_argument("action", choices=["connect", "list", "disconnect"], nargs="?", default="connect")
+    mcp_parser.add_argument("--server", help="Specific server name")
+
     args = parser.parse_args()
 
     if args.command == "init":
@@ -291,6 +295,31 @@ def main():
         finally:
             if started:
                 stop_ollama(proc)
+
+    elif args.command == "mcp":
+        from .core.mcp_host import MCPHost
+        import asyncio
+
+        async def _run_mcp():
+            cfg = config.load()
+            mcp_cfg = cfg.get("mcp", {}).get("servers", {})
+            mcp = MCPHost(cfg.get("mcp", {}))
+            if args.action == "connect":
+                print("[mcp] Connecting to servers...")
+                await mcp.connect(mcp_cfg)
+                wrappers = await mcp.get_tool_wrappers()
+                print(f"[mcp] Got {len(wrappers)} tool wrappers")
+                from .tools import TOOL_REGISTRY
+                for w in wrappers:
+                    TOOL_REGISTRY[w.__name__] = w
+                    print(f"  Registered: {w.__name__}")
+            elif args.action == "list":
+                for name, _ in mcp.sessions:
+                    print(f"  {name}")
+            elif args.action == "disconnect":
+                await mcp.disconnect()
+
+        asyncio.run(_run_mcp())
 
     elif args.command == "config":
         from .config_cli import handle_config

@@ -18,6 +18,8 @@ dependencies = [
     "Pillow",
     "prompt-toolkit",
     "textual>=8.2",
+    "mcp>=1.0",
+    "pyyaml",
 ]
 
 [project.optional-dependencies]
