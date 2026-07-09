@@ -11,6 +11,7 @@ venv/
 .venv/
 env/
 .env/
+WebUi/
 
 # IDE
 .vscode/
@@ -31,4 +32,4 @@ workspace/
 knowledge/
 
 # Dev utilities
-test_brain_integration.py
+test_brain_integration.pynode_modules/

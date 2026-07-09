@@ -20,6 +20,8 @@ dependencies = [
     "textual>=8.2",
     "mcp>=1.0",
     "pyyaml",
+    "fastapi",
+    "uvicorn",
 ]
 
 [project.optional-dependencies]

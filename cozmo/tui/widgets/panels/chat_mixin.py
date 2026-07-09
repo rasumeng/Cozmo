@@ -6,7 +6,7 @@ from textual.containers import ScrollableContainer
 from textual.widgets import Static, Markdown
 
 
-MSG_COLOR_USER = "#1900FF"
+MSG_COLOR_USER = "#7A6EE0"
 MSG_COLOR_ASSISTANT = "#6358C0"
 
 

@@ -829,3 +829,35 @@ Agent thread calls permission_callback(tool, args, agent)
 - execute_python("print('hello')") → "hello" ✅
 - fetch_url("http://example.com") → page text ✅
 - read_knowledge missing file → error (safe) ✅
+- write_knowledge writes OKF file ✅
+- MCP connect/disconnect works ✅
+- MCP tool wrappers call through to registered tools ✅
+- All original Cozmo tests still pass ✅
+
+---
+
+### 2026-07-09 — WebUI color scheme refresh
+
+**Context**: Changed WebUI color palette from teal/amber to purple theme matching TUI (`themes.py`). Replaced sparkle icons with Cozmo pixel-art sprite.
+
+**Files changed**:
+- `cozmo/webui/tailwind.config.js` — accent → purple (`#7A6EE0`), secondary → gold (`#E8C868`), ok/warn/err → TUI palette
+- `cozmo/webui/src/styles/globals.css` — selection highlight + body gradients updated
+- `cozmo/tui/widgets/panels/chat_mixin.py` — user msg color neon blue → purple
+- `cozmo/webui/public/assets/Cozmo-sprite.svg` — new pixel-art SVG (converted from PNG)
+- `cozmo/webui/src/components/sidebar/Sidebar.tsx` — logo "C" → sprite image
+- `cozmo/webui/src/components/chat/Conversation.tsx` — sparkle icons → Cozmo sprite
+
+---
+
+### 2026-07-09 — WebUI sidebar pin/rename/delete
+
+**Context**: Added conversation management to sidebar — pin convos to separate "Pinned" section, inline rename, delete.
+
+**Files changed**:
+- `cozmo/webui/src/types/index.ts` — pinned made required
+- `cozmo/webui/src/hooks/useCozmoChat.ts` — added pinConversation, renameConversation, deleteConversation
+- `cozmo/webui/src/components/sidebar/SidebarItem.tsx` — full rewrite: pin icon on hover, ⋮ menu (pin/unpin, rename, delete), inline rename input
+- `cozmo/webui/src/components/sidebar/Sidebar.tsx` — Pinned + Recents sections; Pinned hides when empty
+- `cozmo/webui/src/App.tsx` — wired new callbacks
+- `cozmo/webui/src/data/mock.ts` — added pinned field to mock data

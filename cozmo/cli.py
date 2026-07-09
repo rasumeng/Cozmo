@@ -238,7 +238,11 @@ def main():
     code_parser.add_argument("--init", action="store_true", help="Index project into Chroma")
     code_parser.add_argument("--auto", action="store_true", help="Non-interactive — allow all permission prompts")
 
-    sub.add_parser("tui", help="Launch the Textual TUI (primary interface)")
+    sub.add_parser("tui", help="Launch the Textual TUI (legacy interface)")
+
+    webui_parser = sub.add_parser("webui", help="Launch the WebUI server (primary interface)")
+    webui_parser.add_argument("--host", default="127.0.0.1")
+    webui_parser.add_argument("--port", type=int, default=8765)
 
     config_parser = sub.add_parser("config", help="Manage configuration")
     config_parser.add_argument("action", choices=["show", "set", "reset"], nargs="?")
@@ -292,6 +296,29 @@ def main():
 
         try:
             CozmoApp().run()
+        finally:
+            if started:
+                stop_ollama(proc)
+
+    elif args.command == "webui":
+        from .ollama_util import is_ollama_running, start_ollama, stop_ollama, wait_for_ollama
+        from .webui_server import run_server
+
+        cfg = config.load()
+        proc, started = None, False
+        if not is_ollama_running():
+            print("Starting Ollama...")
+            proc = start_ollama()
+            if proc:
+                started = True
+                if not wait_for_ollama():
+                    print("Warning: Ollama didn't respond in time. It may still be starting.")
+            else:
+                print("Continuing without Ollama.")
+
+        try:
+            print(f"Cozmo WebUI at http://{args.host}:{args.port}")
+            run_server(cfg, host=args.host, port=args.port)
         finally:
             if started:
                 stop_ollama(proc)
