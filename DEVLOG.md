@@ -861,3 +861,98 @@ Agent thread calls permission_callback(tool, args, agent)
 - `cozmo/webui/src/components/sidebar/Sidebar.tsx` — Pinned + Recents sections; Pinned hides when empty
 - `cozmo/webui/src/App.tsx` — wired new callbacks
 - `cozmo/webui/src/data/mock.ts` — added pinned field to mock data
+
+---
+
+### 2026-07-09 — WebUI: Search chats (Phase 2.3)
+
+**Context**: Added full-text search across all conversations — searches both title and `.md` content, returns matching context snippet.
+
+**New files**:
+- `cozmo/webui/src/components/search/SearchModal.tsx` — Overlay modal with debounced input (200ms), results list with mode icons, click-outside close, Escape close, Enter to select first result
+
+**Changes**:
+- `cozmo/webui_server.py` — Added `GET /api/conversations/search?q=` endpoint: reads `index.json` + `.md` files, searches title + content, returns `snippet` (~120 chars around keyword match). Fixed route ordering (search before `/{conv_id}` delete). Fixed `KeyError 'conversations'` in `_conversations_idx()` when TUI writes index with `"chats"` key.
+- `cozmo/webui/src/components/sidebar/Sidebar.tsx` — Wired search button → SearchModal, passes `onSelect` (sets `chat.activeId`) + `onClose`
+- `cozmo/webui/src/hooks/useCozmoChat.ts` — Search expects only content matches (no title-only), returns keyword context ±60 chars
+
+**Design decisions**:
+- Content-only search (title-only excluded to avoid redundant results)
+- Snippet extracted from raw `.md` text, not message-parsed — simpler, captures more context
+- Debounce 200ms prevents excessive API calls during typing
+- Results capped at 20
+
+---
+
+### 2026-07-09 — WebUI: Settings modal + Input bar menu (Phase 1)
+
+**Context**: Full Settings modal with 6 sections (Models, Tools, Memory, Skills, Connectors, General) and input bar `+` menu with stub actions.
+
+**Changes**:
+- `cozmo/webui/src/components/settings/SettingsModal.tsx` — New: left sidebar (searchable), right panel section content, dirty state tracking, click-outside save+close. Models section: dropdowns for chat/coder/vision/research from Ollama list. Config CRUD via `GET/PUT /api/config`. Tools toggle, memory display, skills/connectors/general stubs.
+- `cozmo/webui/src/components/chat/PromptInput.tsx` — `+` button opens dropdown (Attach files, Add to project, Skills, Connectors — all stubs). Model selector with role badges. Send/stop button.
+- `cozmo/webui_server.py` — Added `GET /api/config`, `PUT /api/config` (deep-merge + tomli_w write). Added `GET /api/ollama/models` (proxies Ollama `/api/tags`).
+- `cozmo/config.py` — Default `chat` model set to `qwen3:8b`
+
+**Model sync**: Settings save calls `onModelChange` → updates `useCozmoChat.setChatModel` → PromptInput re-selects matching model from dropdown.
+
+---
+
+### 2026-07-09 — WebUI: Model presets editor (Phase 2.1)
+
+**Context**: Upgrade Settings > Models from flat dropdowns to a proper preset editor — add/delete custom presets, built-in roles preserved.
+
+**Changes**:
+- `cozmo/webui_server.py` — `put_config` now full-replaces `models` key instead of deep-merge, so deleted custom presets are actually removed from config
+- `cozmo/webui/src/components/settings/SettingsModal.tsx` — Removed separate `customPresets` local state. Custom presets now live in `config.models` directly. Derived from `Object.entries(config.models).filter()` excluding built-in roles (`chat`/`coder`/`vision`/`research`) and internal keys (`classifier`/`max_tokens`). Add creates `preset-{timestamp}` key, rename updates key, delete removes key. Save sends full `config.models` dict — backend persists to `config.toml`.
+
+**Flow**: Add → empty model entry created → user names it → selects model from dropdown → Save → persists to `[models]` section. Survives modal close/reopen.
+
+---
+
+### 2026-07-09 — WebUI: Tools permission mode (Phase 2.2)
+
+**Context**: Each tool in Settings > Tools now has Allow/Ask/Deny 3-mode selector instead of just an enabled toggle. Permission saved to `config.toml [permissions]`.
+
+**Changes**:
+- `cozmo/webui/src/components/settings/SettingsModal.tsx` — Added `PermissionSelect` component (3-button group: Allow/Ask/Deny, color-coded green/amber/red). `renderTools` now reads permissions from `config.permissions`, writes back on change via `updateToolPermission`. Save sends `{ permissions: config.permissions }` alongside models.
+- Backend unchanged — `deep_merge` handles permissions recursively, preserving complex entries like `run_command` patterns.
+
+---
+
+### 2026-07-09 — WebUI: Microphone STT (Phase 3.3)
+
+**Context**: Cross-browser speech-to-text input. Chrome uses native `webkitSpeechRecognition` (streaming, per-word). Other browsers (Brave, Firefox, Edge, VS Code WebView) fall back to MediaRecorder + backend transcription via Google Speech API.
+
+**Multiple iterations during development**:
+
+**Iteration 1** — `webkitSpeechRecognition` only:
+- Frontend: Added `onstart`/`onresult`/`onend`/`onerror` handlers. `onstart` sets listening state (fixes brief flash on unsupported browsers). `continuous: true` + `interimResults: true`. Text appended to input on final results.
+- Problem: Brave/VS Code had `webkitSpeechRecognition` but it failed immediately (shields/permissions). Button flashed then turned off.
+
+**Iteration 2** — Whisper fallback (removed):
+- Backend: Added `POST /api/transcribe` using `openai-whisper` with `tiny` model. Cached model instance via `nonlocal`. Frontend: Added MediaRecorder fallback when SpeechRecognition fails.
+- Problem: Whisper model ~1.5GB download, slow transcription per request. Removed and replaced.
+
+**Iteration 3** — SpeechRecognition library + Google API:
+- Backend: `pip install SpeechRecognition pydub`. `/api/transcribe` now converts WebM → WAV via pydub+ffmpeg, transcribes via Google's free Speech API (`recognize_google()`). No model download, fast.
+- Frontend: Dual path — try SpeechRecognition first, fall back to MediaRecorder on error. Recording saves chunks, sends blob on stop.
+
+**Iteration 4** — Progressive transcription during recording:
+- Added polling (every 2s) during recording that sends accumulated audio to backend. Full audio sent each poll for context. Diffs against previous transcription, appends only new words. Poll interval reduced to 1s for snappier feel.
+- Uses `prefixRef` to preserve user-typed text before recording started. `lastTextRef` tracks previous transcription for diffing.
+
+**Files changed**:
+- `cozmo/webui/src/components/chat/PromptInput.tsx` — Full STT logic: type declarations for SpeechRecognition API, `micState` (idle/listening/recording), `recognitionRef`, `mediaRecorderRef`, `audioChunksRef`, `transcribeAudio`, `sendAccumulated` (diff-based append), polling effect, `onstop` handler. Mic button styled with red glow + pulse when active, red dot when recording. `recorder.start(1000)` for 1s chunk intervals.
+- `cozmo/webui_server.py` — `POST /api/transcribe`: receives UploadFile, converts via pydub, transcribes via `speech_recognition.recognize_google()`. Returns `{"text":"..."}`.
+- `pyproject.toml` — added `SpeechRecognition`, `pydub` (transitive via pip install)
+
+**Dependencies**: `SpeechRecognition`, `pydub`, `ffmpeg` (required for audio conversion)
+
+**Behavior by browser**:
+| Browser | Path | UX |
+|---------|------|----|
+| Chrome | `webkitSpeechRecognition` | Streaming per-word |
+| Brave/Edge/Opera | SpeechRecognition fails → MediaRecorder fallback | Record → 1s poll → progressive text |
+| Firefox/Safari | No SpeechRecognition → MediaRecorder | Same fallback |
+| VS Code WebView | No mic access → button behaves as expected | Graceful no-op |

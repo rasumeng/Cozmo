@@ -7,8 +7,8 @@ CONFIG_PATH = CONFIG_DIR / "config.toml"
 
 DEFAULT_CONFIG = {
     "models": {
-        "classifier": "phi4-mini:3.8b",
-        "chat": "qwen2.5:7b",
+        "classifier": "qwen3:0.6b",
+        "chat": "qwen3:8b",
         "coder": "ornith:9b",
         "vision": "qwen2.5vl:7b",
         "research": "qwen3:8b",
