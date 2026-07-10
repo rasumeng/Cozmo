@@ -7,7 +7,6 @@ WebSocket protocol (/ws/chat), JSON messages:
     {"type": "stop"}                             abort the current run
     {"type": "permission_response", "allowed": bool}
     {"type": "reset"}                            new chat (clears runtime history)
-    {"type": "set_model", "model": "name"}       swap the main model
   server → client:
     {"type": "token",    "text": "..."}          streamed answer token
     {"type": "thinking", "text": "..."}          agent step (mode, tool runs)
@@ -40,17 +39,20 @@ CHATS_DIR = Path.home() / ".cozmo" / "chats"
 def build_runtime(cfg: dict):
     from .core.runtime import CozmoRuntime
     from .core.llm import OllamaModel
+    from .core.model_manager import ModelManager
     from .memory.manager import MemoryManager
     from .code_indexer import ProjectIndex
+    from .ollama_util import resolve_minicpm5
 
     ollama_url = cfg.get("ollama", {}).get("url", "http://localhost:11434")
-    classifier_model = cfg.get("models", {}).get("classifier", "qwen3:0.6b")
-    chat_model = cfg.get("models", {}).get("chat", "qwen2.5:7b")
-    llm = OllamaModel(chat_model, ollama_url)
-    router_llm = OllamaModel(classifier_model, ollama_url)
+    lightweight_model = resolve_minicpm5(ollama_url)
+    is_lightweight = cfg.get("runtime", {}).get("lightweight_mode", False)
+    mm = ModelManager(ollama_url, cfg.get("models", {}),
+                      lightweight_model=lightweight_model if is_lightweight else None)
+    router_llm = OllamaModel(lightweight_model, ollama_url)
     memory = MemoryManager(router_llm, persist_dir=str(Path.home() / ".cozmo" / "memory"))
     project_index = ProjectIndex(Path.cwd())
-    return CozmoRuntime(llm=llm, memory=memory, project_index=project_index,
+    return CozmoRuntime(model_manager=mm, memory=memory, project_index=project_index,
                         cfg=cfg, router_llm=router_llm)
 
 
@@ -406,12 +408,6 @@ def create_app(cfg: dict | None = None) -> FastAPI:
                     if not session.busy:
                         session.runtime.reset()
                         await ws.send_text(json.dumps({"type": "status", "text": "New chat"}))
-                elif mtype == "set_model":
-                    model = msg.get("model", "")
-                    if model and not session.busy:
-                        session.runtime.swap_model(model)
-                        await ws.send_text(json.dumps(
-                            {"type": "status", "text": f"Model: {model}"}))
         except WebSocketDisconnect:
             session.stop()
         finally:

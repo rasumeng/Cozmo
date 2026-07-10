@@ -956,3 +956,28 @@ Agent thread calls permission_callback(tool, args, agent)
 | Brave/Edge/Opera | SpeechRecognition fails → MediaRecorder fallback | Record → 1s poll → progressive text |
 | Firefox/Safari | No SpeechRecognition → MediaRecorder | Same fallback |
 | VS Code WebView | No mic access → button behaves as expected | Graceful no-op |
+
+---
+
+### 2026-07-10 — Routing fix: game/meta queries misclassified as chat
+
+**Context**: Queries about game updates ("who should I pull in wuwa update") classified as `chat` (no tools) instead of `research` (web search). Small router LLM (MiniCPM5-1B) didn't know gaming terms like "wuwa", "pull", "banner".
+
+**Root cause**: `_route()` in `cozmo/core/runtime.py:255-265` used a 1B router LLM with prompt covering news/sports/weather but zero gaming keywords. Query fell through to `chat` → model refused ("I can't search live info").
+
+**Changes** (`cozmo/core/runtime.py`):
+
+| Change | What |
+|--------|------|
+| Expanded `_ROUTE_PROMPT` | Added keywords: `game banners`, `character tiers`, `gacha pulls`, `who to pull`, `what to build` + 5 explicit examples |
+| Added `_RESEARCH_KEYWORDS` | Pre-pass list: `"who should"`, `"pull"`, `"banner"`, `"tier list"`, `"meta"`, `"new character"`, `"gacha"`, `"game update"`, etc. |
+| Keyword pre-pass in `_route()` | Scans query before LLM call → any match returns `"research"` immediately |
+| Fallback default | `"chat"` → `"research"` (matches prompt rule: "when unsure, pick research") |
+
+**Why it works**:
+- "who should I pull in wuwa" → keyword pre-pass catches `"who should"` + `"pull"` → `research` mode
+- "latest genshin banners" → `"banner"` → `research`
+- New examples in prompt help the router LLM learn patterns
+- Fallback defaults to research (safe: web search vs. silent hallucination)
+
+**Files changed**: `cozmo/core/runtime.py`

@@ -153,6 +153,53 @@ cozmo/
 - Session management UI
 - Command palette (Ctrl+P)
 
+## WebUI Roadmap
+
+The React/TypeScript WebUI (`cozmo/webui/`) is the primary interface going forward.
+
+### Phase P0: Foundation (Current)
+- Chat persistence via REST API (`GET/POST/DELETE /api/conversations`)
+- Per-mode recent lists (Chat / Code / Research / Vision)
+- Backend saves conversations as `.md` files with YAML frontmatter
+
+### Phase P1: Core UX
+- **Settings modal** — Models, Tools, Memory, Skills, Connectors, General sections
+- **Input bar menu** — Attach files, Add to project, Skills, Connectors
+- Config CRUD (`GET/PUT /api/config`), Ollama model list proxy
+
+### Phase P2: Deep Features
+- Model presets editor (add/delete custom presets)
+- Tools section with Allow/Ask/Deny permission selectors
+- Full-text search across conversations (title + `.md` content)
+
+### Phase P3: Power User
+- MCP connectors editor
+- Skills section with skill-creator workflow
+- Microphone speech-to-text (Chrome native + MediaRecorder fallback)
+
+### Phase P4: Future
+- Voice mode (two-way speech)
+- Repository-aware collab mode with auto-index
+- Memory viewer (browse/delete ChromaDB summaries)
+
+## Known Issues
+
+### Bugs (Addressed Phase 4)
+- `q` exit from input fields → fixed, uses `Ctrl+Q`
+- Permission modal Escape hang → fixed, signals event on dismiss
+- Sidebar typo "Sessoions" → fixed
+- eval() security → replaced with safe AST parser
+- Shell injection → replaced `shell=True` with `shlex.split`
+- Symlink path traversal → added real-path verification
+
+### Open Issues
+1. **Docker Desktop startup**: If Cozmo launches before Docker initializes, SearXNG won't be available
+2. **Model selector**: Changes take effect next message (agent created per-message)
+3. **Token count**: Estimated, not exact — needs proper tokenizer
+4. **Context window**: No auto-compaction when approaching limit
+5. **Error recovery**: No retry/fallback if Ollama fails mid-stream
+6. **Markdown rendering**: WebUI only, CLI responses are plain text
+
 ## Config
 
 ```toml

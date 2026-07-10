@@ -29,6 +29,7 @@ from langchain_core.messages import (
 from langchain_core.tools import StructuredTool
 
 from .llm import OllamaModel
+from .model_manager import ModelManager
 from .permissions import PermissionResolver
 from ..tools import TOOL_REGISTRY
 
@@ -92,16 +93,33 @@ _MODE_DISCIPLINE = {
 _ROUTE_PROMPT = """Classify the user's latest request as exactly one word:
 - chat: greetings, small talk, definitions, general Q&A answerable from timeless knowledge
 - work: coding, editing files, debugging, shell commands, anything touching the project
-- research: needs current/external info (news, events, wars, sports, prices, weather, releases, schedules, "today", "latest", "recent", "next", "upcoming")
+- research: needs current/external info (news, events, wars, sports, prices, weather, releases, schedules, "today", "latest", "recent", "next", "upcoming", game banners, character tiers, gacha pulls, who to pull, what to build)
 
 Anything about current events or things that change over time is research, even if phrased vaguely.
 When unsure between chat and research, pick research. When it touches code or files, pick work.
+
+Examples:
+- "who should I pull in wuthering waves" → research
+- "latest genshin banners" → research
+- "what's the best team for abyss" → research
+- "edit main.py and fix the bug" → work
+- "what is a monad" → chat
 
 Recent conversation (for context on vague follow-ups):
 {history}
 
 Request: {text}
 Answer with one word:"""
+
+# Pre-pass keywords that short-circuit to research mode before LLM call.
+# Catches patterns the small router model might miss.
+_RESEARCH_KEYWORDS = [
+    "who should", "pull", "banner", "tier list", "meta",
+    "new character", "gacha", "game update", "latest news",
+    "current events", "what's new", "what is the best",
+    "weather", "price", "release", "upcoming", "schedule",
+    "today", "this week", "this month",
+]
 
 _COMPACT_PROMPT = """Condense this conversation into a short context note (4-6 sentences max).
 Keep: what the user is working on, key facts established, decisions made, user preferences.
@@ -124,15 +142,15 @@ class CozmoRuntime:
 
     def __init__(
         self,
-        llm: OllamaModel,
+        model_manager: ModelManager,
         memory=None,
         tools: dict | None = None,
         project_index=None,
         cfg: dict | None = None,
         router_llm: OllamaModel | None = None,
     ):
-        self.llm = llm
-        self.router_llm = router_llm or llm
+        self.model_manager = model_manager
+        self.router_llm = router_llm
         self.memory = memory
         self.tools = tools or TOOL_REGISTRY
         self.project_index = project_index
@@ -167,7 +185,7 @@ class CozmoRuntime:
         self._lc_tools = self._build_lc_tools()
 
     def set_permission_callback(self, callback):
-        """callback(tool_name, args) -> bool. Set by the TUI/CLI layer for 'ask' rules."""
+        """callback(tool_name, args) -> bool. Set by the UI layer for 'ask' rules."""
         self._permission_callback = callback
 
     # ── langchain tool wrappers ──────────────────────────────────────────
@@ -252,6 +270,10 @@ class CozmoRuntime:
     # ── routing ──────────────────────────────────────────────────────────
 
     def _route(self, user_input: str) -> str:
+        query_lower = user_input.lower()
+        for kw in _RESEARCH_KEYWORDS:
+            if kw in query_lower:
+                return "research"
         recent = "\n".join(
             f"User: {u}\nCozmo: {a[:200]}" for u, a in self.history[-3:]
         ) or "(none)"
@@ -261,7 +283,7 @@ class CozmoRuntime:
         for mode in ("work", "research", "chat"):
             if mode in raw:
                 return mode
-        return "chat"
+        return "research"
 
     # ── forced grounding search (research mode) ──────────────────────────
 
@@ -358,8 +380,8 @@ class CozmoRuntime:
 
             temp = self.temps.get(mode, 0.0)
             lc_tools = self._tools_for_mode(mode)
-            runnable = (self.llm.bind_tools(lc_tools, temperature=temp)
-                        if lc_tools else self.llm.client(temp))
+            runnable = (self.model_manager.bind_tools(mode, lc_tools, temperature=temp)
+                        if lc_tools else self.model_manager.client(mode, temp))
 
             msgs = [SystemMessage(content=self._system_prompt(user_input, mode, grounding))]
             msgs += self._history_messages()
@@ -471,5 +493,4 @@ class CozmoRuntime:
         self.history.clear()
         self._summary = ""
 
-    def swap_model(self, model_name: str):
-        self.llm.swap_model(model_name)
+

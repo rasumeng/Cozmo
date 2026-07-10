@@ -2,21 +2,6 @@
 
 Fully on-device AI agent powered by Ollama. Task-specific model routing (chat, coder, vision, research), ChromaDB memory, and tools for desktop, web, and messaging. No cloud dependency.
 
-## Quick Start
-
-```bash
-# From GitHub
-pip install git+https://github.com/YOUR_USERNAME/cozmo.git
-
-# Or from local clone
-git clone https://github.com/YOUR_USERNAME/cozmo.git
-cd cozmo
-pip install -e .
-
-cozmo init          # creates ~/.cozmo/config.toml
-cozmo run "hello"   # start interactive session
-```
-
 Requires [Ollama](https://ollama.ai) running locally with models pulled.
 
 ## Features
@@ -28,11 +13,14 @@ Requires [Ollama](https://ollama.ai) running locally with models pulled.
 - **Vision** — screenshot tool automatically analyzes images via qwen2.5vl:7b; describe what's on your screen
 - **Configurable** — `~/.cozmo/config.toml` — choose models that fit your hardware
 - **No cloud** — everything runs locally via Ollama
+- **Search pipeline** — query rewrite, multi-source search, content extraction, synthesis
+- **Streaming** — token-by-token display with thinking indicators
+- **MCP support** — connect external tool servers via Model Context Protocol
 
 ## Architecture
 
 ```
-User → CLI / Telegram
+User → CLI / Telegram / WebUI
          │
     Orchestrator
      ├── Heuristic pre-filter (greetings → chat, code patterns → coder)
@@ -40,9 +28,25 @@ User → CLI / Telegram
      └── Router → picks specialist model
                     │
               Agent (specialist system prompt + tool registry)
+              ├── ChatAgent — minimal tools, 3 turns
+              ├── CollabAgent — observe-plan-act-reflect, 7 turns
+              ├── CodeAgent — full tools, project index, 5 turns
+              └── PlanAgent — read-only, blocks writes
                     │
               MemoryManager → ChromaDB (summaries persist across sessions)
 ```
+
+### Component Summary
+
+| Component | Role |
+|-----------|------|
+| **Orchestrator** | Heuristic + LLM query classification, routes to specialist |
+| **Agent System** | ReAct loop with tool calling, permission gating, streaming |
+| **Memory** | ChromaDB-backed, auto-summarizes every 5 turns, cross-session |
+| **Search Pipeline** | Query rewrite → multi-source (web+SearXNG) → extract → synthesize |
+| **Tools** | Calculator, file I/O, web search, code ops, git, desktop, Telegram |
+| **MCP Host** | External tool server protocol (stdin/stdout or HTTP SSE) |
+| **Code Index** | ChromaDB project index for codebase-aware queries |
 
 ## Configuration
 
@@ -64,7 +68,28 @@ bot_token = ""
 
 ## Project Status
 
-Phase 3 complete. Core agent, orchestrator with specialist routing, ChromaDB memory, tools (calculator, file ops, web search, desktop with vision, Telegram). See [PLAN.md](PLAN.md) for full roadmap.
+Production-ready for personal use. Core agent, specialist routing, ChromaDB memory, full tool set (code ops, search, desktop, Telegram), WebUI, and MCP support. See [PLAN.md](PLAN.md) for roadmap.
+
+### Known Issues
+
+- **Docker Desktop startup**: SearXNG unavailable if Docker hasn't initialized
+- **Model changes**: Take effect next message (agent created per-message)
+- **Token count**: Estimated, not exact
+
+### Quick Start (Development)
+
+```bash
+git clone https://github.com/rasumeng/cozmo.git
+cd cozmo
+pip install -e .
+pip install -e .[telegram]  # optional Telegram support
+
+cozmo init          # creates ~/.cozmo/config.toml
+cozmo run "hello"   # interactive CLI
+cozmo webui         # launch WebUI at http://127.0.0.1:8765
+```
+
+Requires [Ollama](https://ollama.ai) running locally with models pulled.
 
 ## Install from PyPI (not yet published)
 

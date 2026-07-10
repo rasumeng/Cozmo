@@ -69,17 +69,20 @@ def _handle_slash(cmd: str) -> tuple[str, bool]:
 def interactive_session(cfg: dict, initial_query: str | None = None):
     from .core.runtime import CozmoRuntime
     from .core.llm import OllamaModel
+    from .core.model_manager import ModelManager
     from .memory.manager import MemoryManager
     from .code_indexer import ProjectIndex
+    from .ollama_util import resolve_minicpm5
 
     ollama_url = cfg.get("ollama", {}).get("url", "http://localhost:11434")
-    classifier_model = cfg.get("models", {}).get("classifier", "qwen3:0.6b")
-    chat_model = cfg.get("models", {}).get("chat", "qwen2.5:7b")
-    llm = OllamaModel(chat_model, ollama_url)
-    router_llm = OllamaModel(classifier_model, ollama_url)
+    lightweight_model = resolve_minicpm5(ollama_url)
+    is_lightweight = cfg.get("runtime", {}).get("lightweight_mode", False)
+    mm = ModelManager(ollama_url, cfg.get("models", {}),
+                      lightweight_model=lightweight_model if is_lightweight else None)
+    router_llm = OllamaModel(lightweight_model, ollama_url)
     memory = MemoryManager(router_llm, persist_dir=str(Path.home() / ".cozmo" / "memory"))
     project_index = ProjectIndex(Path.cwd())
-    runtime = CozmoRuntime(llm=llm, memory=memory, project_index=project_index, cfg=cfg,
+    runtime = CozmoRuntime(model_manager=mm, memory=memory, project_index=project_index, cfg=cfg,
                            router_llm=router_llm)
     runtime.set_permission_callback(
         lambda tool, args: runtime._perms.prompt(tool, args, "cozmo")
@@ -101,17 +104,20 @@ def interactive_session(cfg: dict, initial_query: str | None = None):
 def coding_session(cfg: dict, project_path: Path, query: str | None = None, auto: bool = False):
     from .core.runtime import CozmoRuntime
     from .core.llm import OllamaModel
+    from .core.model_manager import ModelManager
     from .memory.manager import MemoryManager
     from .code_indexer import ProjectIndex
+    from .ollama_util import resolve_minicpm5
 
     ollama_url = cfg.get("ollama", {}).get("url", "http://localhost:11434")
-    classifier_model = cfg.get("models", {}).get("classifier", "qwen3:0.6b")
-    coder_model = cfg.get("models", {}).get("coder", "qwen2.5:7b")
-    llm = OllamaModel(coder_model, ollama_url)
-    router_llm = OllamaModel(classifier_model, ollama_url)
+    lightweight_model = resolve_minicpm5(ollama_url)
+    is_lightweight = cfg.get("runtime", {}).get("lightweight_mode", False)
+    mm = ModelManager(ollama_url, cfg.get("models", {}),
+                      lightweight_model=lightweight_model if is_lightweight else None)
+    router_llm = OllamaModel(lightweight_model, ollama_url)
     memory = MemoryManager(router_llm, persist_dir=str(Path.home() / ".cozmo" / "memory"))
     project_index = ProjectIndex(project_path)
-    runtime = CozmoRuntime(llm=llm, memory=memory, project_index=project_index, cfg=cfg,
+    runtime = CozmoRuntime(model_manager=mm, memory=memory, project_index=project_index, cfg=cfg,
                            router_llm=router_llm)
     runtime._perms.auto = auto
     runtime.set_permission_callback(
@@ -197,8 +203,10 @@ def run_telegram(cfg: dict):
     from .tools.telegram import set_bot_instance
     from .core.runtime import CozmoRuntime
     from .core.llm import OllamaModel
+    from .core.model_manager import ModelManager
     from .memory.manager import MemoryManager
     from .code_indexer import ProjectIndex
+    from .ollama_util import resolve_minicpm5
 
     token = cfg.get("telegram", {}).get("bot_token", "")
     if not token:
@@ -206,13 +214,14 @@ def run_telegram(cfg: dict):
         return
 
     ollama_url = cfg.get("ollama", {}).get("url", "http://localhost:11434")
-    classifier_model = cfg.get("models", {}).get("classifier", "qwen3:0.6b")
-    chat_model = cfg.get("models", {}).get("chat", "qwen2.5:7b")
-    llm = OllamaModel(chat_model, ollama_url)
-    router_llm = OllamaModel(classifier_model, ollama_url)
+    lightweight_model = resolve_minicpm5(ollama_url)
+    is_lightweight = cfg.get("runtime", {}).get("lightweight_mode", False)
+    mm = ModelManager(ollama_url, cfg.get("models", {}),
+                      lightweight_model=lightweight_model if is_lightweight else None)
+    router_llm = OllamaModel(lightweight_model, ollama_url)
     memory = MemoryManager(router_llm, persist_dir=str(Path.home() / ".cozmo" / "memory"))
     project_index = ProjectIndex(Path.cwd())
-    runtime = CozmoRuntime(llm=llm, memory=memory, project_index=project_index, cfg=cfg,
+    runtime = CozmoRuntime(model_manager=mm, memory=memory, project_index=project_index, cfg=cfg,
                            router_llm=router_llm)
     # headless: no way to ask — 'ask' rules resolve to deny (fail safe)
 
@@ -229,16 +238,14 @@ def main():
     sub.add_parser("init", help="Generate ~/.cozmo/config.toml")
     sub.add_parser("telegram", help="Run Cozmo as Telegram bot")
 
-    run_parser = sub.add_parser("run", help="[DEPRECATED: use 'tui'] Run a query or start interactive")
+    run_parser = sub.add_parser("run", help="Run a query or start interactive session")
     run_parser.add_argument("query", nargs="?", help="Single query (omit for interactive)")
 
-    code_parser = sub.add_parser("code", help="[DEPRECATED: use 'tui'] Start a coding session")
+    code_parser = sub.add_parser("code", help="Start a coding session with project tools")
     code_parser.add_argument("query", nargs="?", help="Single query (omit for interactive)")
     code_parser.add_argument("--path", default=".", help="Project directory")
     code_parser.add_argument("--init", action="store_true", help="Index project into Chroma")
     code_parser.add_argument("--auto", action="store_true", help="Non-interactive — allow all permission prompts")
-
-    sub.add_parser("tui", help="Launch the Textual TUI (legacy interface)")
 
     webui_parser = sub.add_parser("webui", help="Launch the WebUI server (primary interface)")
     webui_parser.add_argument("--host", default="127.0.0.1")
@@ -278,27 +285,6 @@ def main():
             print(f"Indexed {n} files in {project_path}")
             return
         coding_session(cfg, project_path, args.query, auto=args.auto)
-
-    elif args.command == "tui":
-        from .ollama_util import is_ollama_running, start_ollama, stop_ollama, wait_for_ollama
-        from .tui.app import CozmoApp
-
-        proc, started = None, False
-        if not is_ollama_running():
-            print("Starting Ollama...")
-            proc = start_ollama()
-            if proc:
-                started = True
-                if not wait_for_ollama():
-                    print("Warning: Ollama didn't respond in time. It may still be starting.")
-            else:
-                print("Continuing without Ollama.")
-
-        try:
-            CozmoApp().run()
-        finally:
-            if started:
-                stop_ollama(proc)
 
     elif args.command == "webui":
         from .ollama_util import is_ollama_running, start_ollama, stop_ollama, wait_for_ollama

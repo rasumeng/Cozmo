@@ -91,11 +91,4 @@ class OllamaModel:
         except Exception as e:
             yield f"Error: model unavailable — {e}"
 
-    def swap_model(self, model_name: str):
-        """Swap to a different model. Drops all cached clients."""
-        self.model_name = model_name
-        self._clients = {}
 
-    @property
-    def name(self) -> str:
-        return self.model_name

@@ -32,4 +32,10 @@ workspace/
 knowledge/
 
 # Dev utilities
-test_brain_integration.pynode_modules/
+node_modules/
+
+# Test cache
+.pytest_cache/
+
+# Environment
+.env

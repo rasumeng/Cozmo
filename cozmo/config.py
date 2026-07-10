@@ -7,7 +7,7 @@ CONFIG_PATH = CONFIG_DIR / "config.toml"
 
 DEFAULT_CONFIG = {
     "models": {
-        "classifier": "qwen3:0.6b",
+        "classifier": "hf.co/ewinregirgojr/MiniCPM5-1B-Agentic-Tooluse-GGUF:Q4_K_M",
         "chat": "qwen3:8b",
         "coder": "ornith:9b",
         "vision": "qwen2.5vl:7b",
@@ -35,6 +35,7 @@ DEFAULT_CONFIG = {
         "tool_response_max_chars": 2000,
     },
     "runtime": {
+        "lightweight_mode": False,
         "max_history": 10,
         "max_steps": 8,
         "max_tool_output_chars": 8000,
