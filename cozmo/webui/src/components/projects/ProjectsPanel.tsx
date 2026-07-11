@@ -1,0 +1,118 @@
+import { useState } from 'react'
+import { Plus, FolderKanban, Trash2 } from 'lucide-react'
+import { Project, Conversation } from '@/types'
+import { ProjectForm } from './ProjectForm'
+import { ProjectDetail } from './ProjectDetail'
+
+interface Props {
+  projects: Project[]
+  conversations: Conversation[]
+  onCreateProject: (name: string, description?: string, sharedContext?: string) => Promise<Project | null>
+  onUpdateProject: (id: string, data: Partial<Project>) => Promise<Project | null>
+  onDeleteProject: (id: string) => void
+  onSelectConversation: (id: string) => void
+  onRemoveConversation: (convId: string, projId: string) => void
+  onSelectProject: (id: string | null) => void
+}
+
+export function ProjectsPanel({
+  projects,
+  conversations,
+  onCreateProject,
+  onUpdateProject,
+  onDeleteProject,
+  onSelectConversation,
+  onRemoveConversation,
+  onSelectProject,
+}: Props) {
+  const [showForm, setShowForm] = useState(false)
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null)
+
+  const selectedProject = selectedProjectId ? projects.find(p => p.id === selectedProjectId) ?? null : null
+
+  const handleBack = () => {
+    setSelectedProjectId(null)
+    onSelectProject(null)
+  }
+
+  const handleSelectProject = (id: string) => {
+    setSelectedProjectId(id)
+    onSelectProject(id)
+  }
+
+  if (selectedProject) {
+    return (
+      <ProjectDetail
+        project={selectedProject}
+        conversations={conversations}
+        onBack={handleBack}
+        onUpdate={onUpdateProject}
+        onSelectConversation={onSelectConversation}
+        onRemoveConversation={onRemoveConversation}
+      />
+    )
+  }
+
+  return (
+    <div className="flex-1 flex flex-col min-w-0 bg-base-950">
+      <header className="h-14 shrink-0 flex items-center justify-between px-5 border-b border-base-800">
+        <h2 className="text-sm font-medium text-base-100">Projects</h2>
+        <button
+          onClick={() => setShowForm(true)}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-accent hover:bg-accent/90 text-white text-xs font-medium transition-colors"
+        >
+          <Plus size={14} />
+          New Project
+        </button>
+      </header>
+
+      <div className="flex-1 overflow-y-auto px-6 py-6">
+        {showForm && (
+          <div className="mb-6 p-4 rounded-xl border border-base-700 bg-base-900">
+            <ProjectForm
+              onSubmit={async (data) => {
+                await onCreateProject(data.name, data.description, data.sharedContext)
+                setShowForm(false)
+              }}
+              onCancel={() => setShowForm(false)}
+            />
+          </div>
+        )}
+
+        {projects.length === 0 && !showForm ? (
+          <div className="flex flex-col items-center justify-center pt-24 text-center">
+            <FolderKanban size={48} className="text-base-600 mb-4" />
+            <p className="text-base-300 text-sm mb-1">No projects yet</p>
+            <p className="text-base-500 text-xs">Create a project to group related conversations.</p>
+          </div>
+        ) : (
+          <div className="space-y-2 max-w-2xl">
+            {projects.map(p => (
+              <div
+                key={p.id}
+                className="group flex items-center gap-3 px-4 py-3 rounded-xl bg-base-900 border border-base-800 hover:border-base-700 transition-colors cursor-pointer"
+                onClick={() => handleSelectProject(p.id)}
+              >
+                <FolderKanban size={18} className="text-accent shrink-0" />
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium text-base-100 truncate">{p.name}</p>
+                  {p.description && (
+                    <p className="text-xs text-base-500 truncate">{p.description}</p>
+                  )}
+                  <p className="text-[11px] text-base-600 mt-0.5">{p.conversationIds.length} conversation{p.conversationIds.length !== 1 ? 's' : ''}</p>
+                </div>
+                <button
+                  onClick={(e) => { e.stopPropagation(); onDeleteProject(p.id) }}
+                  className="shrink-0 opacity-0 group-hover:opacity-100 p-1.5 rounded-lg text-base-400 hover:text-err hover:bg-base-800 transition-all"
+                  title="Delete project"
+                >
+                  <Trash2 size={14} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}

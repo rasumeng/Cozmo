@@ -959,6 +959,98 @@ Agent thread calls permission_callback(tool, args, agent)
 
 ---
 
+### 2026-07-10 — File/image attachments, vision routing, projects
+
+**Context**: Three phases implemented from PLAN.md — file/image attachment support in WebUI, vision model routing for image analysis, and project grouping system.
+
+---
+
+#### Phase 1: File & Image Attachments
+
+**Backend** (`webui_server.py`):
+- `POST/GET/DELETE /api/attachments` endpoints — upload to `~/.cozmo/attachments/`, thumbnail gen via PIL (128px width), serve raw files
+- `@attachments` JSON marker in `.md` conversation persistence — round-trips attachment metadata through save/load
+- WS handler accepts `attachments` array in `chat` messages (metadata only, files stay on disk)
+
+**Frontend types** (`types/index.ts`):
+- `Attachment` interface: `{id, type, name, mime, size, url, thumbnail}`
+- `attachments?: Attachment[]` on `ChatMessage`
+
+**Frontend services** (`services/cozmo.ts`):
+- `uploadFile()`, `deleteAttachment()` — REST wrappers with `API_BASE` prefix
+- `sendChat()` accepts attachments (sends `{id, type, name, mime, size}` to WS)
+- `saveConversation()` includes attachments in message payload
+
+**PromptInput** (`PromptInput.tsx`):
+- Hidden `<input type=file multiple accept="image/*,.pdf,.txt,...">` triggered by "+ Attach" button
+- `handlePaste` on textarea — detects clipboard images, uploads, shows as chip
+- Attachment chips between textarea and button bar — thumbnail for images, Paperclip icon for files, X to remove
+- Submit passes `attachments` up via `onSend(content, attachments)`
+
+**MessageBubble** (`MessageBubble.tsx`):
+- Image attachments render as `<img>` with thumbnail, click to open full image
+- File attachments render as download link with icon + file size
+
+**Props/state chain**:
+- `Conversation.onSend` → `(content, attachments?)` (was `(content)`)
+- `useCozmoChat.sendMessage` → `(content, attachments?)` — stores on ChatMessage, sends via WS
+
+---
+
+#### Phase 2: Vision Model Routing
+
+**Runtime** (`runtime.py`):
+- `run_stream(user_input, attachments?)` — accepts attachment list with resolved file paths
+- `_build_multimodal_content()` — base64-encodes image files, builds `HumanMessage(content=[{type:"text"}, {type:"image_url"}])` for langchain `ChatOllama`
+- When images present → forces `"vision"` mode (bypasses `_route()`), uses `qwen2.5vl:7b` from config
+- `_system_prompt` includes attachment metadata + file paths for tools
+- Added `"vision"` to `self.temps` and `self._tool_gate` defaults
+
+**Server** (`webui_server.py`):
+- `ChatSession._resolve_attachments()` — matches UUID -> file path on disk
+- `start_run()` passes resolved attachments + project context to runtime
+- WS handler reads `project_id` field, injects project `sharedContext` into runtime
+
+---
+
+#### Phase 3: Projects
+
+**Backend** (`webui_server.py`):
+- `GET/POST/PUT/DELETE /api/projects` — CRUD persisted to `~/.cozmo/projects/index.json`
+- `GET /api/projects/{id}/conversations` — returns full conversation objects
+- Project schema: `{id, name, description, conversationIds[], sharedContext, createdAt, updatedAt}`
+
+**Frontend types + services**:
+- `Project` interface in `types/index.ts`
+- `fetchProjects()`, `createProject()`, `updateProject()`, `deleteProjectApi()`, `fetchProjectConversations()` in `cozmo.ts`
+
+**Project components** (`components/projects/`):
+- `ProjectsPanel` — list view with "New Project" button, delete per project
+- `ProjectDetail` — shared context editor, linked conversations list with navigate + remove
+- `ProjectForm` — create/edit form (name, description, shared context)
+
+**Sidebar integration**:
+- "Projects" toggle button in sidebar (below workspace tabs, between search and + buttons)
+- `SidebarItem` context menu — "Add to project" submenu listing available projects
+- `Sidebar` passes `projects` + `onAddToProject` down to each item
+
+**App view switching**:
+- `App.tsx` — `showProjects` state toggles between `Conversation` and `ProjectsPanel`
+- `ActivityPanel` hidden during project view
+
+**Project context injection**:
+- `useCozmoChat.sendMessage` auto-detects project via `conversationIds.includes(activeId)`
+- Sends `project_id` in WS payload → server looks up `sharedContext` → injects into `_system_prompt`
+
+---
+
+**Files created**: `ProjectForm.tsx`, `ProjectDetail.tsx`, `ProjectsPanel.tsx`
+**Files modified**: `types/index.ts`, `webui_server.py`, `cozmo.ts`, `runtime.py`, `PromptInput.tsx`, `MessageBubble.tsx`, `Conversation.tsx`, `useCozmoChat.ts`, `App.tsx`, `Sidebar.tsx`, `SidebarItem.tsx`
+
+**Verified**: TypeScript compiles clean, Python syntax + imports OK.
+
+---
+
 ### 2026-07-10 — Routing fix: game/meta queries misclassified as chat
 
 **Context**: Queries about game updates ("who should I pull in wuwa update") classified as `chat` (no tools) instead of `research` (web search). Small router LLM (MiniCPM5-1B) didn't know gaming terms like "wuwa", "pull", "banner".

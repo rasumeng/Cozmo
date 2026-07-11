@@ -1,0 +1,87 @@
+import { motion } from 'framer-motion'
+import clsx from 'clsx'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
+import { FileText } from 'lucide-react'
+import { ChatMessage } from '@/types'
+import { CodeBlock } from './CodeBlock'
+import { ModelBadge } from '@/components/common/ModelBadge'
+
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return bytes + ' B'
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB'
+  return (bytes / (1024 * 1024)).toFixed(1) + ' MB'
+}
+
+export function MessageBubble({ message }: { message: ChatMessage }) {
+  const isUser = message.role === 'user'
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 6 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.25 }}
+      className={clsx('flex flex-col gap-1.5', isUser ? 'items-end' : 'items-start')}
+    >
+      {!isUser && message.model && <ModelBadge model={message.model} />}
+      {message.streaming && (
+        <div className="flex items-center gap-1.5 px-1 pb-1">
+          <span className="w-1.5 h-1.5 rounded-full bg-accent animate-glow" />
+          <span className="w-1.5 h-1.5 rounded-full bg-accent animate-glow" style={{ animationDelay: '0.3s' }} />
+          <span className="w-1.5 h-1.5 rounded-full bg-accent animate-glow" style={{ animationDelay: '0.6s' }} />
+        </div>
+      )}
+      <div
+        className={clsx(
+          'rounded-2xl px-4 py-3 text-[15px] leading-relaxed max-w-[85%]',
+          isUser
+            ? 'bg-accent text-white'
+            : 'bg-base-850 text-base-100 shadow-panel'
+        )}
+        >
+          <ReactMarkdown
+            remarkPlugins={[remarkGfm]}
+            components={{
+              code({ className, children, ...props }) {
+                const match = /language-(\w+)/.exec(className || '')
+                if (match) {
+                  return <CodeBlock language={match[1]} code={String(children).replace(/\n$/, '')} />
+                }
+                return (
+                  <code className="bg-base-800 px-1.5 py-0.5 rounded text-accent-soft text-[13px]" {...props}>
+                    {children}
+                  </code>
+                )
+              },
+              p: ({ children }) => <p className="mb-2 last:mb-0">{children}</p>,
+            }}
+          >
+            {message.content}
+          </ReactMarkdown>
+          {message.attachments?.map(att => (
+            <div key={att.id} className="mt-2 first:mt-0">
+              {att.type === 'image' ? (
+                <a href={att.url} target="_blank" rel="noreferrer">
+                  <img
+                    src={att.thumbnail || att.url}
+                    alt={att.name}
+                    className="max-w-xs rounded-lg border border-base-700 cursor-pointer hover:opacity-90 transition-opacity"
+                  />
+                </a>
+              ) : (
+                <a
+                  href={att.url}
+                  download={att.name}
+                  className="flex items-center gap-2 px-3 py-2 rounded-lg bg-base-800 text-base-200 hover:bg-base-700 transition-colors text-sm"
+                >
+                  <FileText size={14} />
+                  <span className="truncate max-w-[200px]">{att.name}</span>
+                  <span className="text-base-500">{formatFileSize(att.size)}</span>
+                </a>
+              )}
+            </div>
+          ))}
+        </div>
+      <span className="text-[11px] text-base-500 px-1">{message.createdAt}</span>
+    </motion.div>
+  )
+}

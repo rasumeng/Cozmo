@@ -11,7 +11,8 @@ venv/
 .venv/
 env/
 .env/
-WebUi/
+# Frontend is in cozmo/webui/ — tracked, not ignored
+# (WebUi/ was a stale entry from a different layout)
 
 # IDE
 .vscode/

@@ -17,8 +17,10 @@ Loop:
 """
 
 import json
+import base64
 import re
 from datetime import datetime
+from pathlib import Path
 
 from langchain_core.messages import (
     AIMessage,
@@ -27,6 +29,8 @@ from langchain_core.messages import (
     ToolMessage,
 )
 from langchain_core.tools import StructuredTool
+
+ATTACHMENTS_DIR = Path.home() / ".cozmo" / "attachments"
 
 from .llm import OllamaModel
 from .model_manager import ModelManager
@@ -94,6 +98,7 @@ _ROUTE_PROMPT = """Classify the user's latest request as exactly one word:
 - chat: greetings, small talk, definitions, general Q&A answerable from timeless knowledge
 - work: coding, editing files, debugging, shell commands, anything touching the project
 - research: needs current/external info (news, events, wars, sports, prices, weather, releases, schedules, "today", "latest", "recent", "next", "upcoming", game banners, character tiers, gacha pulls, who to pull, what to build)
+- vision: image generation, image editing, processing .png/.jpeg/.bmp/.gif/.tiff/.webp
 
 Anything about current events or things that change over time is research, even if phrased vaguely.
 When unsure between chat and research, pick research. When it touches code or files, pick work.
@@ -171,6 +176,7 @@ class CozmoRuntime:
             "chat": temps.get("chat", 0.6),
             "work": temps.get("work", 0.0),
             "research": temps.get("research", 0.2),
+            "vision": temps.get("vision", 0.2),
         }
 
         # which tools each mode may call (None = all registered tools)
@@ -178,6 +184,7 @@ class CozmoRuntime:
             "chat": [],
             "research": ["web_search", "web_search_pipeline", "web_fetch", "calculator"],
             "work": None,
+            "vision": [],
         })
 
         self._perms = PermissionResolver(self.cfg)
@@ -243,9 +250,17 @@ class CozmoRuntime:
             return ""
 
     def _system_prompt(self, user_input: str, mode: str,
-                       grounding: str = "") -> str:
+                       grounding: str = "",
+                       attachments: list[dict] | None = None) -> str:
         parts = [_IDENTITY.format(date=datetime.now().strftime("%A, %B %d, %Y"))]
         parts.append(_MODE_DISCIPLINE.get(mode, _MODE_DISCIPLINE["chat"]))
+
+        if attachments:
+            file_list = "\n".join(
+                f"- {a['name']} ({a['type']}, {a.get('mime', 'unknown')}) — available at {a.get('path', a.get('url', 'unknown'))}"
+                for a in attachments
+            )
+            parts.append(f"\nUser attached files:\n{file_list}\nReference these when relevant. For images, you can see them directly.")
 
         if self._summary:
             parts.append(f"\nContext from earlier in this session:\n{self._summary}")
@@ -258,6 +273,9 @@ class CozmoRuntime:
             project = self._query_project(user_input)
             if project:
                 parts.append(f"\nRelevant project context:\n{project}")
+
+        if getattr(self, '_project_context', None):
+            parts.append(f"\nProject context:\n{self._project_context}")
 
         if grounding:
             parts.append(
@@ -366,11 +384,30 @@ class CozmoRuntime:
 
     # ── main streaming loop ──────────────────────────────────────────────
 
-    def run_stream(self, user_input: str):
+    def _build_multimodal_content(self, text: str, attachments: list[dict]) -> list:
+        content: list = [{"type": "text", "text": text}]
+        for att in attachments:
+            if att["type"] != "image":
+                continue
+            path = att.get("path", "")
+            if not path or not Path(path).exists():
+                continue
+            try:
+                data = Path(path).read_bytes()
+                b64 = base64.b64encode(data).decode("utf-8")
+                mime = att.get("mime", "image/png")
+                content.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}})
+            except Exception:
+                content.append({"type": "text", "text": f"[Image: {att['name']} — failed to load]"})
+        return content
+
+    def run_stream(self, user_input: str, attachments: list[dict] | None = None):
         """Yield (kind, text) tuples. kind is 'token', 'thinking', or 'status'."""
         try:
+            has_images = attachments and any(a.get("type") == "image" for a in attachments)
+
             yield ("status", "Routing...")
-            mode = self._route(user_input)
+            mode = self._route(user_input) if not has_images else "vision"
             yield ("thinking", f"Mode: {mode}")
 
             grounding = ""
@@ -383,9 +420,14 @@ class CozmoRuntime:
             runnable = (self.model_manager.bind_tools(mode, lc_tools, temperature=temp)
                         if lc_tools else self.model_manager.client(mode, temp))
 
-            msgs = [SystemMessage(content=self._system_prompt(user_input, mode, grounding))]
+            msgs = [SystemMessage(content=self._system_prompt(user_input, mode, grounding, attachments))]
             msgs += self._history_messages()
-            msgs.append(HumanMessage(content=user_input))
+
+            if has_images:
+                multimodal = self._build_multimodal_content(user_input, attachments)
+                msgs.append(HumanMessage(content=multimodal))
+            else:
+                msgs.append(HumanMessage(content=user_input))
 
             final = ""
             seen_calls: set[str] = set()  # break identical-call loops
@@ -453,10 +495,10 @@ class CozmoRuntime:
             yield ("token", msg)
             self._remember(user_input, msg)
 
-    def run(self, user_input: str) -> str:
+    def run(self, user_input: str, attachments: list[dict] | None = None) -> str:
         """Synchronous run. Returns the final answer text."""
         chunks = []
-        for kind, text in self.run_stream(user_input):
+        for kind, text in self.run_stream(user_input, attachments):
             if kind == "token":
                 chunks.append(text)
         return "".join(chunks).strip()

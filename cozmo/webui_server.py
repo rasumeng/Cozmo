@@ -21,8 +21,11 @@ events are marshalled back onto the event loop through an asyncio.Queue.
 
 import asyncio
 import json
+import os
 import re
+import uuid
 import threading
+import mimetypes
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -35,6 +38,7 @@ from .tools import TOOL_REGISTRY
 
 DIST_DIR = Path(__file__).parent / "webui" / "dist"
 CHATS_DIR = Path.home() / ".cozmo" / "chats"
+ATTACHMENTS_DIR = Path.home() / ".cozmo" / "attachments"
 
 def build_runtime(cfg: dict):
     from .core.runtime import CozmoRuntime
@@ -91,12 +95,29 @@ class ChatSession:
     def busy(self) -> bool:
         return self._worker is not None and self._worker.is_alive()
 
-    def start_run(self, user_input: str):
+    def _resolve_attachments(self, attachments_meta: list[dict]) -> list[dict]:
+        resolved = []
+        for a in attachments_meta:
+            entry = dict(a)
+            att_id = a.get("id", "")
+            for p in ATTACHMENTS_DIR.iterdir():
+                if p.stem == att_id and p.is_file():
+                    entry["path"] = str(p)
+                    break
+            resolved.append(entry)
+        return resolved
+
+    def start_run(self, user_input: str, attachments_meta: list[dict] | None = None, project_context: str | None = None):
         self.stop_flag.clear()
+        resolved_atts = self._resolve_attachments(attachments_meta) if attachments_meta else None
+        if project_context:
+            self.runtime._project_context = project_context
+        else:
+            self.runtime._project_context = ""
 
         def work():
             try:
-                for kind, text in self.runtime.run_stream(user_input):
+                for kind, text in self.runtime.run_stream(user_input, resolved_atts):
                     if self.stop_flag.is_set():
                         self._emit({"type": "thinking", "text": "Stopped by user"})
                         break
@@ -150,6 +171,9 @@ def create_app(cfg: dict | None = None) -> FastAPI:
             role = "User" if m.get("role") == "user" else "Cozmo"
             lines.append(f"## {role}")
             lines.append(m.get("content", ""))
+            atts = m.get("attachments")
+            if atts:
+                lines.append(f"@attachments {json.dumps(atts)}")
             lines.append("")
         return "\n".join(lines)
 
@@ -180,20 +204,35 @@ def create_app(cfg: dict | None = None) -> FastAPI:
             m = re.match(r"^## (User|Cozmo)$", line.strip())
             if m:
                 if current_role:
-                    messages.append({"role": current_role,
-                                     "content": "\n".join(current_text).strip(),
-                                     "id": f"{conv_id}-{len(messages)}",
-                                     "createdAt": ""})
+                    msg = _build_msg(conv_id, current_role, current_text, len(messages))
+                    messages.append(msg)
                 current_role = "user" if m.group(1) == "User" else "assistant"
                 current_text = []
             elif current_role:
                 current_text.append(line)
         if current_role:
-            messages.append({"role": current_role,
-                             "content": "\n".join(current_text).strip(),
-                             "id": f"{conv_id}-{len(messages)}",
-                             "createdAt": ""})
+            msg = _build_msg(conv_id, current_role, current_text, len(messages))
+            messages.append(msg)
         return messages
+
+    def _build_msg(conv_id: str, role: str, lines: list, idx: int) -> dict:
+        atts = None
+        clean = []
+        for l in lines:
+            if l.startswith("@attachments "):
+                try:
+                    atts = json.loads(l[len("@attachments "):])
+                except json.JSONDecodeError:
+                    clean.append(l)
+            else:
+                clean.append(l)
+        msg = {"role": role,
+               "content": "\n".join(clean).strip(),
+               "id": f"{conv_id}-{idx}",
+               "createdAt": ""}
+        if atts:
+            msg["attachments"] = atts
+        return msg
 
     @app.put("/api/conversations")
     def put_conversation(body: dict):
@@ -270,6 +309,20 @@ def create_app(cfg: dict | None = None) -> FastAPI:
         if md_path.exists():
             md_path.unlink()
         return {"ok": True}
+
+    def _conversation_by_id(conv_id: str) -> dict | None:
+        idx = _conversations_idx()
+        for c in idx["conversations"]:
+            if c["id"] == conv_id:
+                return {
+                    "id": c["id"],
+                    "title": c["title"],
+                    "updatedAt": c.get("updatedAt", ""),
+                    "pinned": c.get("pinned", False),
+                    "mode": c.get("mode", "chat"),
+                    "messages": _load_messages(c["id"]),
+                }
+        return None
 
     # ── Config CRUD ─────────────────────────────────────────────
 
@@ -369,6 +422,163 @@ def create_app(cfg: dict | None = None) -> FastAPI:
             if src_path: os.unlink(src_path)
             if wav_path: os.unlink(wav_path)
 
+    # ── Projects ───────────────────────────────────────────────
+
+    PROJECTS_DIR = Path.home() / ".cozmo" / "projects"
+    PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+    PROJECTS_INDEX = PROJECTS_DIR / "index.json"
+
+    def _projects_idx() -> dict:
+        if PROJECTS_INDEX.exists():
+            raw = json.loads(PROJECTS_INDEX.read_text("utf-8"))
+            if "projects" not in raw:
+                raw["projects"] = []
+            return raw
+        return {"projects": []}
+
+    def _save_projects_idx(idx: dict):
+        PROJECTS_INDEX.write_text(json.dumps(idx, indent=2), "utf-8")
+
+    @app.get("/api/projects")
+    def get_projects():
+        idx = _projects_idx()
+        return idx["projects"]
+
+    @app.post("/api/projects")
+    def create_project(body: dict):
+        name = (body.get("name") or "").strip()
+        if not name:
+            from fastapi.responses import JSONResponse
+            return JSONResponse({"error": "name required"}, status_code=400)
+        ts = datetime.now(timezone.utc).isoformat()
+        project = {
+            "id": f"proj-{uuid.uuid4().hex[:8]}",
+            "name": name,
+            "description": (body.get("description") or "").strip(),
+            "conversationIds": [],
+            "sharedContext": (body.get("sharedContext") or "").strip(),
+            "createdAt": ts,
+            "updatedAt": ts,
+        }
+        idx = _projects_idx()
+        idx["projects"].insert(0, project)
+        _save_projects_idx(idx)
+        return project
+
+    @app.put("/api/projects/{proj_id}")
+    def update_project(proj_id: str, body: dict):
+        idx = _projects_idx()
+        for p in idx["projects"]:
+            if p["id"] == proj_id:
+                if "name" in body:
+                    p["name"] = body["name"].strip() or p["name"]
+                if "description" in body:
+                    p["description"] = body["description"].strip()
+                if "sharedContext" in body:
+                    p["sharedContext"] = body["sharedContext"].strip()
+                if "conversationIds" in body:
+                    p["conversationIds"] = body["conversationIds"]
+                p["updatedAt"] = datetime.now(timezone.utc).isoformat()
+                _save_projects_idx(idx)
+                return p
+        from fastapi.responses import JSONResponse
+        return JSONResponse({"error": "not found"}, status_code=404)
+
+    @app.delete("/api/projects/{proj_id}")
+    def delete_project(proj_id: str):
+        idx = _projects_idx()
+        idx["projects"] = [p for p in idx["projects"] if p["id"] != proj_id]
+        _save_projects_idx(idx)
+        return {"ok": True}
+
+    @app.get("/api/projects/{proj_id}/conversations")
+    def get_project_conversations(proj_id: str):
+        idx = _projects_idx()
+        for p in idx["projects"]:
+            if p["id"] == proj_id:
+                convs = []
+                for cid in p.get("conversationIds", []):
+                    conv = _conversation_by_id(cid)
+                    if conv:
+                        convs.append(conv)
+                return convs
+        from fastapi.responses import JSONResponse
+        return JSONResponse({"error": "not found"}, status_code=404)
+
+    # ── Attachments ────────────────────────────────────────────
+
+    ATTACHMENTS_DIR.mkdir(parents=True, exist_ok=True)
+
+    @app.post("/api/attachments")
+    async def upload_attachment(file: UploadFile = File(...)):
+        ext = Path(file.filename or "file").suffix
+        att_id = uuid.uuid4().hex
+        filename = f"{att_id}{ext}"
+        path = ATTACHMENTS_DIR / filename
+        content = await file.read()
+        path.write_bytes(content)
+
+        mime = file.content_type or "application/octet-stream"
+        is_image = mime.startswith("image/")
+
+        att = {
+            "id": att_id,
+            "type": "image" if is_image else "file",
+            "name": file.filename or filename,
+            "mime": mime,
+            "size": len(content),
+            "url": f"/api/attachments/{att_id}/file",
+        }
+
+        if is_image:
+            thumb_dir = ATTACHMENTS_DIR / "thumbs"
+            thumb_dir.mkdir(parents=True, exist_ok=True)
+            thumb_path = thumb_dir / filename
+            try:
+                from PIL import Image as PILImage
+                img = PILImage.open(path)
+                img.thumbnail((128, 128))
+                img.save(thumb_path)
+                att["thumbnail"] = f"/api/attachments/{att_id}/thumb"
+            except ImportError:
+                pass
+
+        return att
+
+    @app.get("/api/attachments/{att_id}/file")
+    def get_attachment_file(att_id: str):
+        for p in ATTACHMENTS_DIR.iterdir():
+            if p.stem == att_id and p.is_file():
+                mime_type, _ = mimetypes.guess_type(str(p))
+                from fastapi.responses import FileResponse
+                return FileResponse(str(p), media_type=mime_type or "application/octet-stream")
+        from fastapi.responses import JSONResponse
+        return JSONResponse({"error": "not found"}, status_code=404)
+
+    @app.get("/api/attachments/{att_id}/thumb")
+    def get_attachment_thumb(att_id: str):
+        thumb_dir = ATTACHMENTS_DIR / "thumbs"
+        if not thumb_dir.exists():
+            from fastapi.responses import JSONResponse
+            return JSONResponse({"error": "not found"}, status_code=404)
+        for p in thumb_dir.iterdir():
+            if p.stem == att_id and p.is_file():
+                from fastapi.responses import FileResponse
+                return FileResponse(str(p), media_type="image/jpeg")
+        from fastapi.responses import JSONResponse
+        return JSONResponse({"error": "not found"}, status_code=404)
+
+    @app.delete("/api/attachments/{att_id}")
+    def delete_attachment(att_id: str):
+        for p in ATTACHMENTS_DIR.iterdir():
+            if p.stem == att_id and p.is_file():
+                p.unlink()
+                thumb = ATTACHMENTS_DIR / "thumbs" / p.name
+                if thumb.exists():
+                    thumb.unlink()
+                return {"ok": True}
+        return {"ok": True}
+
     @app.websocket("/ws/chat")
     async def ws_chat(ws: WebSocket):
         await ws.accept()
@@ -392,14 +602,23 @@ def create_app(cfg: dict | None = None) -> FastAPI:
                 if mtype == "chat":
                     content = (msg.get("content") or "").strip()
                     conv_id = msg.get("conversation_id", "")
-                    if not content:
+                    attachments_meta = msg.get("attachments", [])
+                    project_id = msg.get("project_id", "")
+                    if not content and not attachments_meta:
                         continue
                     if session.busy:
                         await ws.send_text(json.dumps(
                             {"type": "error", "text": "A run is already in progress."}))
                         continue
+                    project_context = ""
+                    if project_id:
+                        proj_idx = _projects_idx()
+                        for p in proj_idx.get("projects", []):
+                            if p["id"] == project_id:
+                                project_context = p.get("sharedContext", "")
+                                break
                     session.current_conv_id = conv_id
-                    session.start_run(content)
+                    session.start_run(content, attachments_meta, project_context)
                 elif mtype == "stop":
                     session.stop()
                 elif mtype == "permission_response":
