@@ -26,6 +26,7 @@ DEFAULT_CONFIG = {
     },
     "search": {
         "url": "http://localhost:8080",
+        "backend": "searxng",
     },
     "mcp": {
         "servers": {},

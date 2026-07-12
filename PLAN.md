@@ -254,46 +254,137 @@ Steps to implement:
 - New REST endpoints if needed:
   - `POST /api/mcp/servers` — add server (update config + restart MCPHost)
   - `DELETE /api/mcp/servers/{name}` — remove server
+---
+
+## Phase 6: Wire Up "+" Menu — Step-by-Step Per File
+
+### 6A. "+ Add to project"
+
+**Goal:** clicking "+ Add to project" shows a project picker; selecting one adds the current conversation to that project.
+
+| Step | File | Change |
+|------|------|--------|
+| 1 | `PromptInput.tsx` | Add props: `activeId?: string`, `projects: Project[]`, `onAddToProject: (convId: string, projId: string) => void`. "Add to project" button gets `onClick` → open submenu dropdown listing `projects`. Click project calls `onAddToProject(activeId, project.id)`. If `!activeId` (draft) → gray out + tooltip "Send a message first". If `projects.length === 0` → show "No projects — create one" with link to toggle project panel. |
+| 2 | `Conversation.tsx` | Pass `activeId`, `projects`, `onAddToProject` through to `<PromptInput>`. Source from existing props (already drilling from App/chat hook). |
+| 3 | `App.tsx` | Pass `chat.activeId`, `chat.projects`, `chat.addConversationToProject` to `<Conversation>`. |
+| 4 | `PromptInput.tsx` | Add project picker submenu state (`showProjectSubmenu`). Render as a nested dropdown with search filter. On select, call `onAddToProject(activeId, id)`, close menu, show toast/snackbar confirmation. |
+
+### 6B. "+ Skills"
+
+**Goal:** full-stack skills feature — backend CRUD, settings UI, and skill picker in "+" menu.
+
+**Step 6B-1: Backend API**
+
+| File | Change |
+|------|--------|
+| `webui_server.py` | Add `SKILLS_DIR = Path.home() / ".cozmo" / "skills"` at module level. Create dir on startup. Add endpoints: `GET /api/skills` → list `{name, description}[]` from `SKILLS_DIR/*/SKILL.md` frontmatter, `POST /api/skills` → accept `{name, description, content}` → write `SKILLS_DIR/{name}/SKILL.md`, `DELETE /api/skills/{name}` → rmtree. Add `GET /api/skills/{name}` → return full SKILL.md content. |
+
+**Step 6B-2: Frontend types + services**
+
+| File | Change |
+|------|--------|
+| `types/index.ts` | Add `export interface Skill { name: string; description: string }`. |
+| `services/cozmo.ts` | Add `fetchSkills(): Promise<Skill[]>`, `createSkill(data: {name, description, content}): Promise<Skill|null>`, `deleteSkill(name: string): Promise<void>`. |
+
+**Step 6B-3: Settings > Skills**
+
+| File | Change |
+|------|--------|
+| `SettingsModal.tsx` | Replace `renderSkills()` placeholder. New: fetch skills on mount → list cards with name, description, delete button. "Install Skill" button → opens a form panel (inline or modal) with name + description + content textarea fields. Calls `createSkill()`, refreshes list. Loading/error states. |
+
+**Step 6B-4: "+" menu skill picker**
+
+| File | Change |
+|------|--------|
+| `PromptInput.tsx` | "+ Skills" button `onClick` → open submenu listing `skills` (fetched on mount). Each skill shows `name`. On click: insert trigger prompt `@skill {name}` into textarea, close menu. Fetch skills on mount via `fetchSkills()`. |
+
+**Step 6B-5: skill-creator seed**
+
+| File | Change |
+|------|--------|
+| `webui_server.py` | **Startup**: if `SKILLS_DIR/skill-creator` doesn't exist, create it with the SKILL.md spec from user docs. This seeds the first skill. |
+
+### 6C. "+ Connectors"
+
+**Goal:** full-stack MCP connector management — backend config CRUD, settings UI with add/edit/remove/toggle, status in "+" menu.
+
+**Step 6C-1: Backend API endpoints**
+
+| File | Change |
+|------|--------|
+| `webui_server.py` | Add `GET /api/mcp/servers` → return `{name, command, args, env, enabled}[]` from `config.mcp.servers`. Add `POST /api/mcp/servers` → accept `{name, command, args?, env?, enabled?}`, write to config, restart MCPHost if running. Add `PUT /api/mcp/servers/{name}` → update server config fields. Add `DELETE /api/mcp/servers/{name}` → remove from config, kill MCP process. Add `POST /api/mcp/servers/{name}/toggle` → flip enabled flag, start/stop MCP process. Add `GET /api/mcp/servers/{name}/tools` → return discovered tool list from the MCP server (if connected). |
+
+**Step 6C-2: Frontend types + services**
+
+| File | Change |
+|------|--------|
+| `types/index.ts` | Add `export interface McpServer { name: string; command: string; args: string[]; env: Record<string,string>; enabled: boolean; tools?: ToolInfo[] }`. |
+| `services/cozmo.ts` | Add `fetchMcpServers(): Promise<McpServer[]>`, `addMcpServer(data): Promise<McpServer|null>`, `updateMcpServer(name, data): Promise<McpServer|null>`, `removeMcpServer(name): Promise<void>`, `toggleMcpServer(name): Promise<McpServer|null>`, `fetchMcpTools(name): Promise<ToolInfo[]>`. |
+
+**Step 6C-3: Settings > Connectors**
+
+| File | Change |
+|------|--------|
+| `SettingsModal.tsx` | Upgrade `renderConnectors()`. New: fetch MCP servers on mount. "Add MCP Server" button → opens a modal with fields: name (text), command (text, e.g. `npx`), args (tags input, e.g. `-y @modelcontextprotocol/server-filesystem ./data`), env vars (key-value rows). List each server as a card with: status dot (green=enabled/connected, gray=disabled, red=error), name, command, tools count. Toggle switch for enabled/disabled. Delete button. "Tools" expand → fetch and show tool list with name + description. |
+
+**Step 6C-4: "+" menu connector status**
+
+| File | Change |
+|------|--------|
+| `PromptInput.tsx` | "+ Connectors" button `onClick` → open submenu listing active MCP servers with status dots. Quick-toggle each on/off. Clicking a server name opens Settings > Connectors section. Fetch status on mount via `fetchMcpServers()`. |
+
+### 6D. Cross-Cutting: PromptInput Prop Plumbing
+
+PromptInput needs new props for all three features:
+
+```typescript
+interface Props {
+  generating: boolean
+  disabled: boolean
+  onSend: (content: string, attachments?: Attachment[]) => void
+  onStop: () => void
+  // + Add to project:
+  activeId?: string
+  projects: Project[]
+  onAddToProject: (convId: string, projId: string) => void
+  // + Connectors quick-toggle:
+  mcpServers: McpServer[]
+  onToggleMcpServer: (name: string) => void
+}
+```
+
+All three bubble through `Conversation.tsx` → `App.tsx` → `useCozmoChat`.
 
 ---
 
 ## Implementation Order
 
 ```
-Phase 1: File/Image Attachments (BACKEND + FRONTEND)
-  ├─ types/index.ts         — Attachment type
-  ├─ webui_server.py        — /api/attachments endpoints
-  ├─ services/cozmo.ts      — uploadFile, deleteAttachment
-  ├─ PromptInput.tsx        — file input, attachment chips, paste handler
-  ├─ MessageBubble.tsx       — render attachments
-  ├─ Conversation.tsx        — pass attachments through
-  └─ useCozmoChat.ts        — sendMessage with attachments
+SPRINT 1: "+ Add to project" (∼½ day)
+  ├─ PromptInput.tsx         — project picker submenu + props
+  ├─ Conversation.tsx        — pass new props through
+  └─ App.tsx                 — pass chat state down
 
-Phase 2: Image Paste
-  └─ PromptInput.tsx        — clipboard paste handler (uses Phase 1 upload)
+SPRINT 2: Skills backend (∼½ day)
+  ├─ webui_server.py         — /api/skills endpoints + SKILLS_DIR
+  ├─ types/index.ts          — Skill interface
+  ├─ services/cozmo.ts       — fetchSkills, createSkill, deleteSkill
+  └─ webui_server.py         — seed skill-creator SKILL.md on startup
 
-Phase 3: Projects (BACKEND + FRONTEND)
-  ├─ types/index.ts          — Project type
-  ├─ webui_server.py         — /api/projects endpoints
-  ├─ services/cozmo.ts       — project API wrappers
-  ├─ components/projects/    — ProjectsPanel, ProjectDetail, ProjectForm
-  ├─ Sidebar.tsx             — project mode toggle, project conversation list
-  ├─ SidebarItem.tsx         — "Add to project" context menu
-  ├─ useCozmoChat.ts         — projects state + shared context injection
-  └─ webui_server.py         — project context in WS chat
+SPRINT 3: Skills frontend (∼½ day)
+  ├─ SettingsModal.tsx        — real skills list + install form
+  ├─ PromptInput.tsx         — skills picker submenu
+  └─ Conversation.tsx        — pass fetchSkills down (or fetch inline)
 
-Phase 4: Skills
-  ├─ webui_server.py         — /api/skills endpoints
-  ├─ services/cozmo.ts       — skills API wrappers
-  ├─ SettingsModal.tsx        — skills list + install/remove
-  ├─ PromptInput.tsx         — skills picker in "+" menu
-  ├─ skill-creator skill     — SKILL.md on backend
-  └─ skills/ directory       — on-disk skill storage
+SPRINT 4: Connectors backend (∼½ day)
+  ├─ webui_server.py         — /api/mcp/servers CRUD + toggle
+  ├─ types/index.ts          — McpServer interface
+  └─ services/cozmo.ts       — fetchMcpServers, addMcpServer, removeMcpServer, toggleMcpServer
 
-Phase 5: Connectors MCP UI
-  ├─ SettingsModal.tsx        — add/edit/remove MCP server form
-  ├─ services/cozmo.ts       — MCP server API wrappers
-  └─ webui_server.py         — MCP config management endpoints
+SPRINT 5: Connectors frontend (∼1 day)
+  ├─ SettingsModal.tsx        — add/edit/remove MCP form + tool discovery
+  ├─ PromptInput.tsx         — connectors status submenu + quick-toggle
+  └─ Conversation.tsx        — pass mcpServers + onToggleMcpServer through
 ```
 
 ---

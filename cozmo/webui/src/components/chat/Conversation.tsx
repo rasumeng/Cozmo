@@ -1,9 +1,11 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Sparkles, PanelRightClose, PanelRightOpen } from 'lucide-react'
-import { Conversation as ConversationType, Attachment } from '@/types'
+import { Conversation as ConversationType, Attachment, Project } from '@/types'
 import { ConnectionState } from '@/services/cozmo'
+import type { SectionId } from '@/components/settings/SettingsModal'
 import { MessageBubble } from './MessageBubble'
 import { PromptInput } from './PromptInput'
+import { LandingPage } from './LandingPage'
 
 interface Props {
   conversation: ConversationType
@@ -13,6 +15,14 @@ interface Props {
   onSend: (content: string, attachments?: Attachment[]) => void
   onStop: () => void
   onToggleActivity: () => void
+  activeConversationId?: string
+  projects?: Project[]
+  onAddToProject?: (convId: string, projId: string) => void
+  onOpenProjectPanel?: () => void
+  onOpenSettings?: (section: SectionId) => void
+  onCreateSkillTrigger?: () => void
+  pendingSkillTrigger?: boolean
+  onConsumeSkillTrigger?: () => void
 }
 
 const CONNECTION_LABEL: Record<ConnectionState, { text: string; dot: string }> = {
@@ -29,8 +39,17 @@ export function Conversation({
   onSend,
   onStop,
   onToggleActivity,
+  activeConversationId,
+  projects,
+  onAddToProject,
+  onOpenProjectPanel,
+  onOpenSettings,
+  onCreateSkillTrigger,
+  pendingSkillTrigger,
+  onConsumeSkillTrigger,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null)
+  const [suggestionText, setSuggestionText] = useState('')
 
   // stick to bottom as tokens stream in
   useEffect(() => {
@@ -66,17 +85,13 @@ export function Conversation({
 
       <div ref={scrollRef} className="flex-1 overflow-y-auto">
         <div className="max-w-3xl mx-auto px-6 py-8 space-y-6">
-          {conversation.messages.length === 0 && (
-            <div className="flex flex-col items-center justify-center pt-24 text-center">
-              <img src="/assets/Cozmo-sprite.svg" alt="" className="w-auto h-20" style={{ imageRendering: 'pixelated' }} />              
-              <p className="text-base-300 text-sm">
-                Ask Cozmo anything — code, files, research.
-              </p>
-            </div>
+          {conversation.messages.length === 0 ? (
+            <LandingPage mode={conversation.mode} onSuggestion={setSuggestionText} />
+          ) : (
+            conversation.messages.map((m) => (
+              <MessageBubble key={m.id} message={m} />
+            ))
           )}
-          {conversation.messages.map((m) => (
-            <MessageBubble key={m.id} message={m} />
-          ))}
         </div>
       </div>
 
@@ -85,8 +100,17 @@ export function Conversation({
           <PromptInput
             generating={generating}
             disabled={connection !== 'open'}
-            onSend={onSend}
+            onSend={(content, attachments) => { setSuggestionText(''); onSend(content, attachments) }}
             onStop={onStop}
+            activeConversationId={activeConversationId}
+            projects={projects}
+            onAddToProject={onAddToProject}
+            onOpenProjectPanel={onOpenProjectPanel}
+            onOpenSettings={onOpenSettings}
+            onCreateSkillTrigger={onCreateSkillTrigger}
+            pendingSkillTrigger={pendingSkillTrigger}
+            onConsumeSkillTrigger={onConsumeSkillTrigger}
+            suggestion={suggestionText}
           />
         </div>
       </div>

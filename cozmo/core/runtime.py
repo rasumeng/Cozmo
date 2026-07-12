@@ -19,6 +19,8 @@ Loop:
 import json
 import base64
 import re
+import threading
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from datetime import datetime
 from pathlib import Path
 
@@ -31,10 +33,62 @@ from langchain_core.messages import (
 from langchain_core.tools import StructuredTool
 
 ATTACHMENTS_DIR = Path.home() / ".cozmo" / "attachments"
+SKILLS_DIR = Path.home() / ".cozmo" / "skills"
+
+
+# ── Skill loading ─────────────────────────────────────────────────────────────
+
+_SKILL_RE = re.compile(r"@skill\s+([a-z0-9][a-z0-9-]*)", re.IGNORECASE)
+
+
+def _load_all_skills() -> dict[str, dict]:
+    """Return {name: {name, description, content, files, path}} for every installed skill."""
+    skills: dict[str, dict] = {}
+    if not SKILLS_DIR.is_dir():
+        return skills
+    for folder in sorted(SKILLS_DIR.iterdir()):
+        if not folder.is_dir():
+            continue
+        skill_file = folder / "SKILL.md"
+        if not skill_file.exists():
+            continue
+        content = skill_file.read_text("utf-8")
+        name = folder.name
+        description = ""
+        if content.startswith("---"):
+            end = content.find("\n---", 3)
+            if end != -1:
+                import yaml
+                try:
+                    fm = yaml.safe_load(content[3:end])
+                    if isinstance(fm, dict):
+                        description = fm.get("description", "") or ""
+                        name = fm.get("name", name)
+                except Exception:
+                    pass
+        files: dict[str, str] = {}
+        for f in folder.rglob("*"):
+            if not f.is_file() or f.name == "SKILL.md":
+                continue
+            if f.suffix == ".pyc" or "__pycache__" in str(f):
+                try:
+                    rel = str(f.relative_to(folder))
+                    files[rel] = f.read_text("utf-8")
+                except Exception:
+                    pass
+        skills[name] = {
+            "name": name,
+            "description": description,
+            "content": content,
+            "files": files,
+            "path": folder,
+        }
+    return skills
 
 from .llm import OllamaModel
 from .model_manager import ModelManager
 from .permissions import PermissionResolver
+from .tool_registry import ToolRegistry
 from ..tools import TOOL_REGISTRY
 
 
@@ -81,27 +135,36 @@ _MODE_DISCIPLINE = {
     ),
     "research": (
         "MODE: RESEARCH — the user needs CURRENT information.\n"
-        "- Search results are provided below and via tools. Base your answer "
+        "- Search results are provided below. Base your answer "
         "ONLY on those results, never on training data — your training data "
         "is stale for this question.\n"
-        "- If the provided results don't contain the answer, call web_search "
-        "or web_search_pipeline again with a better query. Do NOT answer from "
-        "memory.\n"
+        "- The results below are your PRIMARY source. Answer from them directly. "
+        "Do NOT re-search unless the results are clearly empty or irrelevant.\n"
         "- If results conflict, prefer the most recent and say so.\n"
         "- Cite where facts came from (source names/domains from the results).\n"
         "- If you genuinely cannot find the answer in any results, say exactly "
         "that — do not fabricate."
+    ),
+    "collab": (
+        "MODE: COLLAB — structured task execution with an approved plan.\n"
+        "- The user approved the plan below. Execute each step in order.\n"
+        "- Use tools to complete each step. Report progress after each step.\n"
+        "- If a step fails, note the failure and continue with remaining steps.\n"
+        "- In your final response, summarize what was completed and any issues.\n"
+        "- Do NOT deviate from the approved plan without asking the user first."
     ),
 }
 
 _ROUTE_PROMPT = """Classify the user's latest request as exactly one word:
 - chat: greetings, small talk, definitions, general Q&A answerable from timeless knowledge
 - work: coding, editing files, debugging, shell commands, anything touching the project
+- collab: structured multi-step tasks like writing specs, planning architecture, documenting, brainstorming, researching, creating reports or proposals
 - research: needs current/external info (news, events, wars, sports, prices, weather, releases, schedules, "today", "latest", "recent", "next", "upcoming", game banners, character tiers, gacha pulls, who to pull, what to build)
 - vision: image generation, image editing, processing .png/.jpeg/.bmp/.gif/.tiff/.webp
 
 Anything about current events or things that change over time is research, even if phrased vaguely.
 When unsure between chat and research, pick research. When it touches code or files, pick work.
+Multi-step tasks that need planning (writing docs, creating specs, architecture design, research reports) → collab.
 
 Examples:
 - "who should I pull in wuthering waves" → research
@@ -109,6 +172,9 @@ Examples:
 - "what's the best team for abyss" → research
 - "edit main.py and fix the bug" → work
 - "what is a monad" → chat
+- "write a spec for the auth system" → collab
+- "plan the architecture for a new feature" → collab
+- "draft documentation for the API" → collab
 
 Recent conversation (for context on vague follow-ups):
 {history}
@@ -125,6 +191,22 @@ _RESEARCH_KEYWORDS = [
     "weather", "price", "release", "upcoming", "schedule",
     "today", "this week", "this month",
 ]
+
+_COLLAB_PLAN_PROMPT = """You are planning a multi-step task. Review the context and generate a clear, numbered plan.
+
+CONTEXT:
+{context}
+
+USER REQUEST: {query}
+
+Generate a numbered plan with concrete steps. Each step should say what you will do, which tools you'll use, and the expected output.
+
+Format:
+## Plan
+1. [Step description] — tools: [tool names] — output: [expected result]
+2. [Step description] — tools: [tool names] — output: [expected result]
+
+Keep steps focused and actionable. 3-7 steps is typical for most tasks."""
 
 _COMPACT_PROMPT = """Condense this conversation into a short context note (4-6 sentences max).
 Keep: what the user is working on, key facts established, decisions made, user preferences.
@@ -149,7 +231,7 @@ class CozmoRuntime:
         self,
         model_manager: ModelManager,
         memory=None,
-        tools: dict | None = None,
+        registry: ToolRegistry | None = None,
         project_index=None,
         cfg: dict | None = None,
         router_llm: OllamaModel | None = None,
@@ -157,7 +239,7 @@ class CozmoRuntime:
         self.model_manager = model_manager
         self.router_llm = router_llm
         self.memory = memory
-        self.tools = tools or TOOL_REGISTRY
+        self._registry = registry or ToolRegistry()
         self.project_index = project_index
         self.cfg = cfg or {}
         self.history: list[tuple[str, str]] = []
@@ -176,6 +258,7 @@ class CozmoRuntime:
             "chat": temps.get("chat", 0.6),
             "work": temps.get("work", 0.0),
             "research": temps.get("research", 0.2),
+            "collab": temps.get("collab", 0.2),
             "vision": temps.get("vision", 0.2),
         }
 
@@ -184,31 +267,40 @@ class CozmoRuntime:
             "chat": [],
             "research": ["web_search", "web_search_pipeline", "web_fetch", "calculator"],
             "work": None,
+            "collab": None,
             "vision": [],
         })
+
+        self._plan_callback = None  # UI hook: (plan_text) -> bool
 
         self._perms = PermissionResolver(self.cfg)
         self._permission_callback = None  # UI hook: (tool, args) -> bool
         self._lc_tools = self._build_lc_tools()
+        self._skills = _load_all_skills()
+        self._skill_names_list = ", ".join(
+            f"{n} ({s['description'][:60]})" for n, s in self._skills.items()
+        ) if self._skills else "(none installed)"
+        self.stop_event: threading.Event | None = None
+
+    def _check_stop(self):
+        """Stop the generator early if stop_event was set."""
+        if self.stop_event and self.stop_event.is_set():
+            return True
+        return False
 
     def set_permission_callback(self, callback):
         """callback(tool_name, args) -> bool. Set by the UI layer for 'ask' rules."""
         self._permission_callback = callback
 
+    def set_plan_callback(self, callback):
+        """callback(plan_text) -> bool. Set by the UI layer for collab plan approval."""
+        self._plan_callback = callback
+
     # ── langchain tool wrappers ──────────────────────────────────────────
 
     def _build_lc_tools(self) -> dict:
         """Wrap registry functions as StructuredTools (schema from signatures)."""
-        wrapped = {}
-        for name, fn in self.tools.items():
-            try:
-                doc = (fn.__doc__ or f"{name} tool").strip()
-                wrapped[name] = StructuredTool.from_function(
-                    func=fn, name=name, description=doc.split("\n")[0]
-                )
-            except Exception:
-                continue
-        return wrapped
+        return self._registry.as_lc_tools()
 
     def _tools_for_mode(self, mode: str) -> list:
         allowed = self._tool_gate.get(mode, None)
@@ -251,9 +343,35 @@ class CozmoRuntime:
 
     def _system_prompt(self, user_input: str, mode: str,
                        grounding: str = "",
-                       attachments: list[dict] | None = None) -> str:
+                       attachments: list[dict] | None = None,
+                       activated_skills: list[dict] | None = None) -> str:
         parts = [_IDENTITY.format(date=datetime.now().strftime("%A, %B %d, %Y"))]
         parts.append(_MODE_DISCIPLINE.get(mode, _MODE_DISCIPLINE["chat"]))
+
+        if self._skills:
+            skill_lines = "\n".join(
+                f"  {n} — {s['description'][:120]}"
+                for n, s in self._skills.items()
+            )
+            parts.append(
+                "AVAILABLE SKILLS (you can activate one by writing @skill <name> in your response):\n"
+                f"{skill_lines}"
+            )
+
+        if activated_skills:
+            for sk in activated_skills:
+                parts.append(
+                    f"ACTIVATED SKILL: {sk['name']}\n"
+                    f"{sk['content']}"
+                )
+                if sk.get("files"):
+                    files_text = "\n\n".join(
+                        f"--- {path} ---\n{text}"
+                        for path, text in sk["files"].items()
+                    )
+                    parts.append(
+                        f"SKILL FILES ({sk['name']}):\n{files_text}"
+                    )
 
         if attachments:
             file_list = "\n".join(
@@ -298,7 +416,7 @@ class CozmoRuntime:
         raw = self.router_llm.invoke(
             _ROUTE_PROMPT.format(history=recent, text=user_input)
         ).strip().lower()
-        for mode in ("work", "research", "chat"):
+        for mode in ("collab", "work", "research", "chat"):
             if mode in raw:
                 return mode
         return "research"
@@ -307,16 +425,55 @@ class CozmoRuntime:
 
     def _grounding_search(self, user_input: str) -> str:
         """Deterministically run one search before the loop. Small models
-        skip tools and hallucinate current events if given the choice."""
+        skip tools and hallucinate current events if given the choice.
+        Timeout after 15s to prevent hanging."""
+        if self._check_stop():
+            return ""
         for name in _SEARCH_TOOL_PREFERENCE:
-            fn = self.tools.get(name)
-            if fn is None:
+            info = self._registry.get(name)
+            if info is None:
                 continue
             try:
-                return self._sanitize(str(fn(query=user_input)))
+                with ThreadPoolExecutor(max_workers=1) as pool:
+                    fut = pool.submit(info.fn, query=user_input)
+                    result = fut.result(timeout=15)
+                return self._sanitize(str(result))
+            except FutureTimeout:
+                return "(search timed out — check network / SearXNG)"
             except Exception as e:
                 return f"(search failed: {e})"
         return ""
+
+    # ── collab mode: plan generation ──────────────────────────────────────
+
+    def _gather_collab_context(self, user_input: str) -> str:
+        """Gather memory, project info, and search results for plan context."""
+        parts = []
+        memory = self._query_memory(user_input)
+        if memory:
+            parts.append(f"Memory from past sessions:\n{memory}")
+        if self._project_context:
+            parts.append(f"Project context:\n{self._project_context}")
+        if self.project_index:
+            try:
+                project = self.project_index.query(user_input, k=self.max_project_results)
+                if project:
+                    parts.append(f"Relevant project files:\n{project}")
+            except Exception:
+                pass
+        if self._summary:
+            parts.append(f"Session summary:\n{self._summary}")
+        return "\n\n".join(parts) if parts else "(no additional context)"
+
+    def _generate_plan(self, user_input: str, context: str) -> str:
+        """Use the research model to generate a structured plan."""
+        try:
+            llm = self.model_manager.client("research", temperature=0.2)
+            prompt = _COLLAB_PLAN_PROMPT.format(context=context, query=user_input)
+            plan = llm.invoke(prompt)
+            return plan.strip()
+        except Exception as e:
+            return f"1. Investigate the request: {user_input}\n2. Execute based on available tools and context.\n(Plan generation failed: {e})"
 
     # ── tool call extraction (native + text fallback) ────────────────────
 
@@ -358,15 +515,15 @@ class CozmoRuntime:
         return False
 
     def _exec_tool(self, name: str, args: dict) -> str:
-        fn = self.tools.get(name)
-        if fn is None:
-            known = ", ".join(sorted(self.tools))
+        info = self._registry.get(name)
+        if info is None:
+            known = ", ".join(sorted(t.name for t in self._registry.list()))
             return f"Error: unknown tool '{name}'. Available tools: {known}"
         if not self._check_permission(name, args):
             return (f"Error: the user DENIED permission for {name}. Do not retry "
                     f"this call — explain what you wanted to do and ask the user.")
         try:
-            raw = str(fn(**args))
+            raw = str(info.fn(**args))
         except TypeError as e:
             return f"Error: bad arguments for {name}: {e}. Check the tool schema and retry."
         except Exception as e:
@@ -406,21 +563,53 @@ class CozmoRuntime:
         try:
             has_images = attachments and any(a.get("type") == "image" for a in attachments)
 
+            # ── skill activation ──────────────────────────────────────────
+            activated_skills: list[dict] = []
+            if self._skills:
+                for match in _SKILL_RE.finditer(user_input):
+                    skill_name = match.group(1).lower()
+                    sk = self._skills.get(skill_name)
+                    if sk and sk not in activated_skills:
+                        activated_skills.append(sk)
+
             yield ("status", "Routing...")
             mode = self._route(user_input) if not has_images else "vision"
-            yield ("thinking", f"Mode: {mode}")
+            if activated_skills:
+                names = ", ".join(s["name"] for s in activated_skills)
+                yield ("thinking", f"Mode: {mode} — Skills: {names}", f"Operating in {mode} mode with skills: {names}", None)
+            else:
+                yield ("thinking", f"Mode: {mode}", f"Operating in {mode} mode", None)
 
             grounding = ""
             if mode == "research":
-                yield ("thinking", "Searching...")
+                yield ("thinking", "Searching...", "Searching the web for context", user_input)
                 grounding = self._grounding_search(user_input)
+            elif mode == "collab":
+                yield ("thinking", "Planning...", "Generating a plan for review", user_input)
+                context = self._gather_collab_context(user_input)
+                plan = self._generate_plan(user_input, context)
+                yield ("plan", plan, "Review and approve the proposed plan", None)
+                approved = True
+                if self._plan_callback:
+                    approved = self._plan_callback(plan)
+                if not approved:
+                    yield ("token", "Plan not approved. Please refine your request and try again.")
+                    return
+                grounding = f"APPROVED PLAN:\n{plan}\n\nExecute each step of this approved plan in order. Report progress after each step."
 
             temp = self.temps.get(mode, 0.0)
             lc_tools = self._tools_for_mode(mode)
+
+            _SEARCH_TOOL_NAMES = {"web_search", "web_search_pipeline", "web_fetch", "fetch_url"}
+            _skip_search = bool(grounding)  # skip search tools on first step if we already have results
+            if _skip_search:
+                lc_tools = [t for t in lc_tools if t.name not in _SEARCH_TOOL_NAMES]
+
             runnable = (self.model_manager.bind_tools(mode, lc_tools, temperature=temp)
                         if lc_tools else self.model_manager.client(mode, temp))
 
-            msgs = [SystemMessage(content=self._system_prompt(user_input, mode, grounding, attachments))]
+            msgs = [SystemMessage(content=self._system_prompt(
+                user_input, mode, grounding, attachments, activated_skills))]
             msgs += self._history_messages()
 
             if has_images:
@@ -438,6 +627,8 @@ class CozmoRuntime:
                 streamed = False
 
                 for chunk in runnable.stream(msgs):
+                    if self._check_stop():
+                        return
                     acc = chunk if acc is None else acc + chunk
                     piece = chunk.content or ""
                     if piece:
@@ -465,9 +656,15 @@ class CozmoRuntime:
                 msgs.append(ai if isinstance(ai, AIMessage)
                             else AIMessage(content=content_buf))
                 names = ", ".join(c["name"] for c in calls)
-                yield ("thinking", f"Running: {names}")
+                calls_detail = "; ".join(
+                    f"{c['name']}({json.dumps(c['args'], default=str)[:200]})"
+                    for c in calls
+                )
+                yield ("thinking", f"Running: {names}", calls_detail, None)
 
                 for c in calls:
+                    if self._check_stop():
+                        return
                     sig = f"{c['name']}:{json.dumps(c['args'], sort_keys=True, default=str)}"
                     if sig in seen_calls:
                         out = (f"Error: you already made this exact {c['name']} call "
@@ -477,7 +674,16 @@ class CozmoRuntime:
                         seen_calls.add(sig)
                         out = self._exec_tool(c["name"], c["args"])
                     msgs.append(ToolMessage(content=out, tool_call_id=c["id"]))
-                yield ("thinking", "Thinking...")
+                    if self._check_stop():
+                        return
+                yield ("thinking", "Thinking...", "Processing tool results and forming response", None)
+
+                # after first step, restore full search tools
+                if _skip_search:
+                    _skip_search = False
+                    full_tools = self._tools_for_mode(mode)
+                    runnable = (self.model_manager.bind_tools(mode, full_tools, temperature=temp)
+                                if full_tools else self.model_manager.client(mode, temp))
             else:
                 # exhausted max_steps without a final answer
                 final = ("I ran out of steps before finishing. Here's where I "

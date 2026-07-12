@@ -5,7 +5,6 @@ import { Conversation, Project } from '@/types'
 import { SidebarItem } from './SidebarItem'
 import { WorkspaceTabs } from './WorkspaceTabs'
 import { WORKSPACE_MODE_CONFIG, WorkspaceMode } from './workspaceModes'
-import { SettingsModal } from '@/components/settings/SettingsModal'
 import { SearchModal } from '@/components/search/SearchModal'
 
 interface Props {
@@ -15,6 +14,7 @@ interface Props {
   activeId: string
   onSelect: (id: string) => void
   onNewChat: (mode?: WorkspaceMode) => void
+  onTabChange: (mode: WorkspaceMode) => void
   onPin: (id: string) => void
   onRename: (id: string, title: string) => void
   onDelete: (id: string) => void
@@ -22,18 +22,20 @@ interface Props {
   showProjects?: boolean
   onToggleProjects?: () => void
   onAddToProject?: (convId: string, projId: string) => void
+  settingsOpen?: boolean
+  onOpenSettings?: () => void
+  onCloseSettings?: () => void
 }
 
-export function Sidebar({ collapsed, onToggleCollapse, conversations, activeId, onSelect, onNewChat, onPin, onRename, onDelete, projects, showProjects, onToggleProjects, onAddToProject }: Props) {
+export function Sidebar({ collapsed, onToggleCollapse, conversations, activeId, onSelect, onNewChat, onTabChange, onPin, onRename, onDelete, projects, showProjects, onToggleProjects, onAddToProject, settingsOpen, onOpenSettings, onCloseSettings }: Props) {
   const [mode, setMode] = useState<WorkspaceMode>('chat')
-  const [settingsOpen, setSettingsOpen] = useState(false)
   const [searchOpen, setSearchOpen] = useState(false)
   const modeConfig = WORKSPACE_MODE_CONFIG[mode]
 
   const handleModeChange = (m: WorkspaceMode) => {
     if (m === mode) return
     setMode(m)
-    onNewChat(m)
+    onTabChange(m)
   }
   const modeConversations = useMemo(() => conversations.filter((c) => c.mode === mode), [conversations, mode])
 
@@ -115,10 +117,9 @@ export function Sidebar({ collapsed, onToggleCollapse, conversations, activeId, 
       )}
 
       <div className="mt-auto px-2 py-3 space-y-0.5 border-t border-base-800">
-        <SidebarFooterItem icon={<Settings size={15} />} label="Settings" collapsed={collapsed} onClick={() => setSettingsOpen(true)} />
+        <SidebarFooterItem icon={<Settings size={15} />} label="Settings" collapsed={collapsed} onClick={() => onOpenSettings?.()} />
       </div>
       <SearchModal open={searchOpen} onClose={() => setSearchOpen(false)} onSelect={onSelect} />
-      <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
     </motion.aside>
   )
 }

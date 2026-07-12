@@ -34,7 +34,7 @@ class SearchResult:
 
 @dataclass
 class SearchConfig:
-    backend: str = "auto"  # "searxng", "duckduckgo", "auto"
+    backend: str = "searxng"  # "searxng", "duckduckgo", "auto"
     searxng_url: str = "http://localhost:8080"
     max_results: int = 10
     max_fetch: int = 3
@@ -49,7 +49,7 @@ def _get_config() -> SearchConfig:
         cfg = config.load()
         search_cfg = cfg.get("search", {})
         return SearchConfig(
-            backend=search_cfg.get("backend", "auto"),
+            backend=search_cfg.get("backend", "searxng"),
             searxng_url=search_cfg.get("searxng_url", "http://localhost:8080"),
             max_results=search_cfg.get("max_results", 10),
             max_fetch=search_cfg.get("max_fetch", 3),

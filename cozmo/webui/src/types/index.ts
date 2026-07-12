@@ -70,9 +70,90 @@ export interface Project {
   updatedAt: string
 }
 
+export type PlanStepStatus = 'pending' | 'approved' | 'rejected'
+
+export interface PlanData {
+  plan: string
+  status: PlanStepStatus
+}
+
 export interface ToolInfo {
   id: string
   name: string
   description: string
   enabled: boolean
+}
+
+export interface Skill {
+  name: string
+  description: string
+}
+
+export interface McpServer {
+  name: string
+  command: string
+  args: string[]
+  env: Record<string, string>
+  enabled: boolean
+  tools?: ToolInfo[]
+}
+
+export interface McpCatalogEnvVar {
+  key: string
+  label: string
+  secret: boolean
+  optional: boolean
+  default: string
+}
+
+export interface McpCatalogEntry {
+  id: string
+  display_name: string
+  description: string
+  command: string
+  args: string[]
+  transport: string
+  tags: string[]
+  category: string
+  capabilities: string[]
+  env_vars: McpCatalogEnvVar[]
+  homepage: string
+}
+
+export interface McpServerTool {
+  name: string
+  description: string
+}
+
+export interface McpServerStatus {
+  status: 'ok' | 'error' | 'disconnected'
+  tools: McpServerTool[]
+}
+
+export interface McpStatusResponse {
+  [serverName: string]: McpServerStatus
+}
+
+export interface McpServerDetail {
+  name: string
+  status: 'ok' | 'error' | 'disconnected' | 'connecting'
+  description?: string
+  capabilities: string[]
+  tools: McpServerTool[]
+  config: {
+    command: string
+    args: string[]
+    env: Record<string, string>
+  }
+  diagnostics: {
+    transport: string
+    startup_time_ms: number | null
+    last_connected: string | null
+    last_ping: string | null
+    response_time_ms: number | null
+  }
+  permissions?: Record<string, boolean>
+  source: 'catalog' | 'custom'
+  category?: string
+  homepage?: string
 }

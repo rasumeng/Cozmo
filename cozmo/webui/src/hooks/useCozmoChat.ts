@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Conversation, ActivityStep, WorkspaceMode, Attachment, Project } from '@/types'
+import { Conversation, ActivityStep, WorkspaceMode, Attachment, Project, PlanData } from '@/types'
 import { CozmoClient, ConnectionState, ServerEvent, fetchConversations, saveConversation, deleteConversationApi, fetchProjects, createProject, updateProject, deleteProjectApi, fetchProjectConversations } from '@/services/cozmo'
 
 export interface PermissionRequest {
@@ -22,6 +22,7 @@ export function useCozmoChat() {
   const [generating, setGenerating] = useState(false)
   const [activity, setActivity] = useState<ActivityStep[]>([])
   const [permission, setPermission] = useState<PermissionRequest | null>(null)
+  const [plan, setPlan] = useState<PlanData | null>(null)
   const [draftMode, setDraftMode] = useState<WorkspaceMode>('chat')
   const [projects, setProjects] = useState<Project[]>([])
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null)
@@ -93,11 +94,21 @@ export function useCozmoChat() {
     dirtyRef.current = true
   }, [updateActive])
 
-  const pushActivity = useCallback((label: string, running = false) => {
+  const detailFromLabel = (label: string): string | undefined => {
+    if (label.startsWith('Running:')) return `Executing ${label.slice(8).trim()}`
+    if (label.startsWith('Mode:')) return `Operating in ${label.slice(5).trim().split('—')[0].trim()} mode`
+    if (label === 'Searching...') return 'Searching the web for context'
+    if (label === 'Thinking...') return 'Processing tool results and forming response'
+    if (label === 'Routing...') return 'Routing request to best agent mode'
+    if (label.startsWith('Stopped')) return 'Generation was cancelled by the user'
+    return label
+  }
+
+  const pushActivity = useCallback((label: string, running = false, detail?: string, query?: string) => {
     setActivity((steps) => {
       // close out the previous running step
       const closed = steps.map((s) =>
-        s.status === 'running' ? { ...s, status: 'completed' as const } : s
+        s.status === 'running' ? { ...s, status: 'completed' as const, durationMs: s.startedAt ? Date.now() - new Date(s.startedAt).getTime() : undefined } : s
       )
       return [
         ...closed,
@@ -105,6 +116,8 @@ export function useCozmoChat() {
           id: nextId(),
           icon: label.startsWith('Running:') ? 'Terminal' : 'Brain',
           label,
+          detail: detail ?? detailFromLabel(label),
+          query,
           status: running ? ('running' as const) : ('completed' as const),
           startedAt: now(),
         },
@@ -119,10 +132,13 @@ export function useCozmoChat() {
           appendToken(ev.text)
           break
         case 'thinking':
-          pushActivity(ev.text, true)
+          pushActivity(ev.text, true, ev.detail, ev.query)
           break
         case 'status':
-          pushActivity(ev.text, true)
+          pushActivity(ev.text, true, ev.detail, ev.query)
+          break
+        case 'plan':
+          setPlan({ plan: ev.plan, status: 'pending' })
           break
         case 'permission_request':
           setPermission({ tool: ev.tool, args: ev.args })
@@ -131,9 +147,10 @@ export function useCozmoChat() {
           finishStreaming()
           setGenerating(false)
           setPermission(null)
+          setPlan(null)
           setActivity((steps) =>
             steps.map((s) =>
-              s.status === 'running' ? { ...s, status: 'completed' } : s
+              s.status === 'running' ? { ...s, status: 'completed' as const, durationMs: s.startedAt ? Date.now() - new Date(s.startedAt).getTime() : undefined } : s
             )
           )
           break
@@ -214,6 +231,15 @@ export function useCozmoChat() {
     setPermission(null)
   }, [])
 
+  const answerPlan = useCallback((approved: boolean) => {
+    clientRef.current?.answerPlan(approved)
+    if (approved) {
+      setPlan((p) => p ? { ...p, status: 'approved' } : null)
+    } else {
+      setPlan(null)
+    }
+  }, [])
+
   const newChat = useCallback((mode: WorkspaceMode = 'chat') => {
     if (generating) return
     clientRef.current?.reset()
@@ -292,10 +318,12 @@ export function useCozmoChat() {
     setActiveId,
     generating,
     activity,
+    plan,
     permission,
     sendMessage,
     stop,
     answerPermission,
+    answerPlan,
     newChat,
     pinConversation,
     renameConversation,

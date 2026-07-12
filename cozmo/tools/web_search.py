@@ -5,33 +5,79 @@ import urllib.parse
 from datetime import datetime, timezone
 
 from . import register_tool
-from ddgs import DDGS
+
+
+def _search_searxng(query: str, max_results: int = 5, timelimit: str = None) -> list[dict]:
+    """Search using SearXNG. Returns list of {title, url, snippet} dicts or empty list."""
+    try:
+        from ..searxng_util import ensure_searxng
+        searxng_url = ensure_searxng()
+    except Exception:
+        return []
+
+    if not searxng_url:
+        return []
+
+    params = urllib.parse.urlencode({
+        "q": query,
+        "format": "json",
+        "language": "en",
+    })
+    if timelimit:
+        params += f"&time_range={timelimit}"
+
+    url = f"{searxng_url}/search?{params}"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Cozmo/1.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+
+        results = []
+        for item in data.get("results", [])[:max_results]:
+            results.append({
+                "title": item.get("title", ""),
+                "url": item.get("url", ""),
+                "snippet": item.get("content", ""),
+            })
+        return results
+    except Exception:
+        return []
 
 
 @register_tool()
 def web_search(query: str, max_results: int = 5, timelimit: str = None) -> str:
     """Search the web for current information. Returns date-stamped results with title + snippet + URL.
-    
+
+    Uses SearXNG when available, falls back to DuckDuckGo.
+
     Args:
         query: Search query
         max_results: Number of results (default 5)
         timelimit: Time filter - 'd' (day), 'w' (week), 'm' (month), 'y' (year). Default: None (all time)
     """
     search_date = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    try:
-        with DDGS() as ddgs:
-            kwargs = {"query": query, "max_results": max_results}
-            if timelimit:
-                kwargs["timelimit"] = timelimit
-            results = list(ddgs.text(**kwargs))
-        if not results:
-            return f"Search performed: {search_date}\nNo results found."
-        lines = [f"Search performed: {search_date}"]
-        for i, r in enumerate(results, 1):
-            lines.append(f"{i}. **{r['title']}**\n   {r['body']}\n   {r['href']}")
-        return "\n\n".join(lines)
-    except Exception as e:
-        return f"Error searching web: {e}"
+
+    results = _search_searxng(query, max_results, timelimit)
+    if not results:
+        try:
+            from ddgs import DDGS
+            with DDGS() as ddgs:
+                kwargs = {"query": query, "max_results": max_results}
+                if timelimit:
+                    kwargs["timelimit"] = timelimit
+                results = list(ddgs.text(**kwargs))
+        except Exception as e:
+            return f"Error searching web: {e}"
+
+    if not results:
+        return f"Search performed: {search_date}\nNo results found."
+    lines = [f"Search performed: {search_date}"]
+    for i, r in enumerate(results, 1):
+        title = r.get("title", r.get("title", ""))
+        snippet = r.get("snippet", r.get("body", ""))
+        href = r.get("url", r.get("href", ""))
+        lines.append(f"{i}. **{title}**\n   {snippet}\n   {href}")
+    return "\n\n".join(lines)
 
 
 @register_tool()

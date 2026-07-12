@@ -1,12 +1,13 @@
 // WebSocket client for the Cozmo FastAPI backend (cozmo/webui_server.py).
 // Reconnects automatically; events are fanned out to a single handler.
 
-import { Conversation, Attachment, Project } from '@/types'
+import { Conversation, Attachment, Project, Skill, McpCatalogEntry, McpStatusResponse, McpServerDetail } from '@/types'
 
 export type ServerEvent =
   | { type: 'token'; text: string }
-  | { type: 'thinking'; text: string }
-  | { type: 'status'; text: string }
+  | { type: 'thinking'; text: string; detail?: string; query?: string }
+  | { type: 'status'; text: string; detail?: string; query?: string }
+  | { type: 'plan'; plan: string }
   | { type: 'permission_request'; tool: string; args: Record<string, unknown> }
   | { type: 'done' }
   | { type: 'error'; text: string }
@@ -79,6 +80,9 @@ export class CozmoClient {
   }
   answerPermission(allowed: boolean) {
     return this.send({ type: 'permission_response', allowed })
+  }
+  answerPlan(approved: boolean) {
+    return this.send({ type: 'plan_response', approved })
   }
   reset() {
     return this.send({ type: 'reset' })
@@ -163,6 +167,40 @@ export async function fetchProjectConversations(id: string): Promise<Conversatio
   return []
 }
 
+export async function fetchSkills(): Promise<Skill[]> {
+  try {
+    const r = await fetch(`${API_BASE}/api/skills`)
+    if (r.ok) return r.json()
+  } catch { /* ignore */ }
+  return []
+}
+
+export async function createSkill(data: { name: string; description?: string; content?: string }): Promise<Skill | null> {
+  try {
+    const r = await fetch(`${API_BASE}/api/skills`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    })
+    if (r.ok) return r.json()
+  } catch { /* ignore */ }
+  return null
+}
+
+export async function deleteSkill(name: string): Promise<void> {
+  await fetch(`${API_BASE}/api/skills/${encodeURIComponent(name)}`, { method: 'DELETE' })
+}
+
+export async function uploadSkill(file: File): Promise<Skill | null> {
+  const form = new FormData()
+  form.append('file', file)
+  try {
+    const r = await fetch(`${API_BASE}/api/skills/upload`, { method: 'POST', body: form })
+    if (r.ok) return r.json()
+  } catch { /* ignore */ }
+  return null
+}
+
 export async function uploadFile(file: File): Promise<Attachment | null> {
   const form = new FormData()
   form.append('file', file)
@@ -180,6 +218,30 @@ export async function uploadFile(file: File): Promise<Attachment | null> {
 
 export async function deleteAttachment(id: string): Promise<void> {
   await fetch(`${API_BASE}/api/attachments/${encodeURIComponent(id)}`, { method: 'DELETE' })
+}
+
+export async function fetchServerDetail(name: string): Promise<McpServerDetail | null> {
+  try {
+    const r = await fetch(`${API_BASE}/api/mcp/servers/${encodeURIComponent(name)}`)
+    if (r.ok) return r.json()
+  } catch { /* ignore */ }
+  return null
+}
+
+export async function fetchMcpStatus(): Promise<McpStatusResponse> {
+  try {
+    const r = await fetch(`${API_BASE}/api/mcp/status`)
+    if (r.ok) return r.json()
+  } catch { /* ignore */ }
+  return {}
+}
+
+export async function fetchMcpCatalog(): Promise<McpCatalogEntry[]> {
+  try {
+    const r = await fetch(`${API_BASE}/api/mcp/catalog`)
+    if (r.ok) return r.json()
+  } catch { /* ignore */ }
+  return []
 }
 
 export { deleteConversationApi as deleteConversation }

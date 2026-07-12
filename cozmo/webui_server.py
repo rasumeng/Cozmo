@@ -3,16 +3,18 @@ Cozmo WebUI server — FastAPI bridge between the React frontend and CozmoRuntim
 
 WebSocket protocol (/ws/chat), JSON messages:
   client → server:
-    {"type": "chat", "content": "..."}          start a run
-    {"type": "stop"}                             abort the current run
+    {"type": "chat", "content": "..."}                      start a run
+    {"type": "stop"}                                         abort the current run
     {"type": "permission_response", "allowed": bool}
-    {"type": "reset"}                            new chat (clears runtime history)
+    {"type": "plan_response", "approved": bool}
+    {"type": "reset"}                                        new chat (clears runtime history)
   server → client:
-    {"type": "token",    "text": "..."}          streamed answer token
-    {"type": "thinking", "text": "..."}          agent step (mode, tool runs)
-    {"type": "status",   "text": "..."}          transient status line
+    {"type": "token",    "text": "..."}                      streamed answer token
+    {"type": "thinking", "text": "..."}                      agent step (mode, tool runs)
+    {"type": "status",   "text": "..."}                      transient status line
+    {"type": "plan",     "plan": "..."}                      collab plan awaiting approval
     {"type": "permission_request", "tool": "...", "args": {...}}
-    {"type": "done"}                             run finished
+    {"type": "done"}                                         run finished
     {"type": "error",    "text": "..."}
 
 The runtime loop is synchronous, so each run executes in a worker thread and
@@ -39,6 +41,11 @@ from .tools import TOOL_REGISTRY
 DIST_DIR = Path(__file__).parent / "webui" / "dist"
 CHATS_DIR = Path.home() / ".cozmo" / "chats"
 ATTACHMENTS_DIR = Path.home() / ".cozmo" / "attachments"
+SKILLS_DIR = Path.home() / ".cozmo" / "skills"
+DEFAULT_SKILLS_DIR = Path(__file__).parent / "default_skills"
+
+# Module-level list of all MCPManagers so config-save can notify them
+_builtin_mcp_managers: list = []
 
 def build_runtime(cfg: dict):
     from .core.runtime import CozmoRuntime
@@ -47,6 +54,9 @@ def build_runtime(cfg: dict):
     from .memory.manager import MemoryManager
     from .code_indexer import ProjectIndex
     from .ollama_util import resolve_minicpm5
+    from .core.tool_registry import ToolRegistry
+    from .core.providers.mcp import MCPManager
+    from .tools import TOOL_REGISTRY
 
     ollama_url = cfg.get("ollama", {}).get("url", "http://localhost:11434")
     lightweight_model = resolve_minicpm5(ollama_url)
@@ -56,9 +66,42 @@ def build_runtime(cfg: dict):
     router_llm = OllamaModel(lightweight_model, ollama_url)
     memory = MemoryManager(router_llm, persist_dir=str(Path.home() / ".cozmo" / "memory"))
     project_index = ProjectIndex(Path.cwd())
-    return CozmoRuntime(model_manager=mm, memory=memory, project_index=project_index,
-                        cfg=cfg, router_llm=router_llm)
 
+    # Set up tool registry with builtins
+    registry = ToolRegistry()
+    for name, fn in TOOL_REGISTRY.items():
+        registry.register(name, fn)
+
+    # Start MCP connections (persistent background event loop)
+    mcp = MCPManager(registry)
+    mcp.start(cfg)
+    _builtin_mcp_managers.append(mcp)
+
+    runtime = CozmoRuntime(
+        model_manager=mm,
+        memory=memory,
+        registry=registry,
+        project_index=project_index,
+        cfg=cfg,
+        router_llm=router_llm,
+    )
+    runtime._mcp_manager = mcp  # keep ref for lifecycle
+    return runtime
+
+
+def seed_default_skills():
+    """Copy default skills (e.g. skill-creator) into ~/.cozmo/skills/ on first run."""
+    import shutil
+    if not DEFAULT_SKILLS_DIR.exists():
+        return
+    SKILLS_DIR.mkdir(parents=True, exist_ok=True)
+    for folder in DEFAULT_SKILLS_DIR.iterdir():
+        if not folder.is_dir():
+            continue
+        target = SKILLS_DIR / folder.name
+        if target.exists():
+            continue
+        shutil.copytree(str(folder), str(target), dirs_exist_ok=True)
 
 class ChatSession:
     """One WebSocket connection = one runtime + one run at a time."""
@@ -68,15 +111,20 @@ class ChatSession:
         self.loop = loop
         self.events: asyncio.Queue = asyncio.Queue()
         self.stop_flag = threading.Event()
+        self.runtime.stop_event = self.stop_flag
         self._perm_event = threading.Event()
         self._perm_allowed = False
+        self._plan_event = threading.Event()
+        self._plan_approved = False
         self._worker: threading.Thread | None = None
         self.current_conv_id = ""
         self.runtime.set_permission_callback(self._ask_permission)
+        self.runtime.set_plan_callback(self._ask_plan)
 
     # runs in worker thread
     def _emit(self, payload: dict):
-        self.loop.call_soon_threadsafe(self.events.put_nowait, payload)
+        cleaned = {k: v for k, v in payload.items() if v is not None}
+        self.loop.call_soon_threadsafe(self.events.put_nowait, cleaned)
 
     # runs in worker thread — block until the browser answers
     def _ask_permission(self, tool: str, args: dict) -> bool:
@@ -90,6 +138,19 @@ class ChatSession:
     def answer_permission(self, allowed: bool):
         self._perm_allowed = bool(allowed)
         self._perm_event.set()
+
+    # runs in worker thread — block until the browser approves/rejects plan
+    def _ask_plan(self, plan_text: str) -> bool:
+        self._plan_event.clear()
+        self._emit({"type": "plan", "plan": plan_text})
+        # 300s timeout → reject (fail safe)
+        if not self._plan_event.wait(timeout=300):
+            return False
+        return self._plan_approved
+
+    def answer_plan(self, approved: bool):
+        self._plan_approved = approved
+        self._plan_event.set()
 
     @property
     def busy(self) -> bool:
@@ -117,11 +178,14 @@ class ChatSession:
 
         def work():
             try:
-                for kind, text in self.runtime.run_stream(user_input, resolved_atts):
+                for item in self.runtime.run_stream(user_input, resolved_atts):
                     if self.stop_flag.is_set():
-                        self._emit({"type": "thinking", "text": "Stopped by user"})
+                        self._emit({"type": "thinking", "text": "Stopped by user", "detail": "Generation was cancelled by the user"})
                         break
-                    self._emit({"type": kind, "text": text})
+                    kind, text = item[0], item[1]
+                    detail = item[2] if len(item) > 2 else None
+                    query = item[3] if len(item) > 3 else None
+                    self._emit({"type": kind, "text": text, "detail": detail, "query": query})
             except Exception as e:
                 self._emit({"type": "error", "text": str(e)})
             finally:
@@ -359,6 +423,12 @@ def create_app(cfg: dict | None = None) -> FastAPI:
         CONFIG_PATH = config.CONFIG_PATH
         CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
         CONFIG_PATH.write_text(tomli_w.dumps(cfg), "utf-8")
+        # notify all MCP managers so they sync their connections
+        for mcp in _builtin_mcp_managers:
+            try:
+                mcp.refresh_from_config(cfg)
+            except Exception:
+                pass
         return {"ok": True}
 
     # ── Ollama available models ─────────────────────────────────
@@ -375,6 +445,9 @@ def create_app(cfg: dict | None = None) -> FastAPI:
         except Exception:
             pass
         return []
+
+    # seed default skills on startup
+    seed_default_skills()
 
     # ── Endpoints ─────────────────────────────────────────────
 
@@ -505,6 +578,142 @@ def create_app(cfg: dict | None = None) -> FastAPI:
         from fastapi.responses import JSONResponse
         return JSONResponse({"error": "not found"}, status_code=404)
 
+    # ── Skills ────────────────────────────────────────────────
+
+    @app.get("/api/skills")
+    def get_skills():
+        if not SKILLS_DIR.exists():
+            return []
+        skills = []
+        for folder in sorted(SKILLS_DIR.iterdir()):
+            if not folder.is_dir():
+                continue
+            skill_file = folder / "SKILL.md"
+            if not skill_file.exists():
+                continue
+            content = skill_file.read_text("utf-8")
+            name = folder.name
+            description = ""
+            if content.startswith("---"):
+                import yaml
+                end = content.find("\n---", 3)
+                if end != -1:
+                    fm = yaml.safe_load(content[3:end])
+                    if isinstance(fm, dict):
+                        description = fm.get("description", "") or ""
+            skills.append({"name": name, "description": description})
+        return skills
+
+    @app.post("/api/skills")
+    def create_skill(body: dict):
+        name = (body.get("name") or "").strip()
+        if not name:
+            from fastapi.responses import JSONResponse
+            return JSONResponse({"error": "name required"}, status_code=400)
+        skill_dir = SKILLS_DIR / name
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        content = body.get("content") or ""
+        desc = body.get("description", "")
+        frontmatter = f"---\nname: {name}\ndescription: \"{desc}\"\n---\n\n"
+        (skill_dir / "SKILL.md").write_text(frontmatter + content, "utf-8")
+        return {"name": name, "description": desc}
+
+    @app.post("/api/skills/upload")
+    async def upload_skill(file: UploadFile = File(...)):
+        content = await file.read()
+        text = content.decode("utf-8")
+        name = Path(file.filename or "skill.md").stem
+        skill_dir = SKILLS_DIR / name
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        (skill_dir / "SKILL.md").write_text(text, "utf-8")
+        # parse description from frontmatter
+        description = ""
+        if text.startswith("---"):
+            import yaml
+            end = text.find("\n---", 3)
+            if end != -1:
+                fm = yaml.safe_load(text[3:end])
+                if isinstance(fm, dict):
+                    description = fm.get("description", "") or ""
+        return {"name": name, "description": description}
+
+    @app.delete("/api/skills/{skill_name}")
+    def delete_skill(skill_name: str):
+        import shutil
+        target = SKILLS_DIR / skill_name
+        if target.exists() and target.is_dir():
+            shutil.rmtree(target)
+        return {"ok": True}
+
+    # ── MCP Status ──────────────────────────────────────────────
+
+    @app.get("/api/mcp/status")
+    def get_mcp_status():
+        if _builtin_mcp_managers:
+            return _builtin_mcp_managers[0].get_status()
+        return {}
+
+    # ── MCP Server Detail ───────────────────────────────────────
+
+    @app.get("/api/mcp/servers/{name}")
+    def get_mcp_server_detail(name: str):
+        detail: dict = {"name": name}
+        if _builtin_mcp_managers:
+            mgr = _builtin_mcp_managers[0]
+            mcp_detail = mgr.get_server_detail(name)
+            if mcp_detail:
+                detail.update(mcp_detail)
+        # merge catalog metadata if available
+        from .core.providers.catalog import lookup_by_name
+        meta = lookup_by_name(name)
+        if meta:
+            detail["source"] = "catalog"
+            detail["description"] = meta["description"]
+            detail["capabilities"] = meta["capabilities"]
+            detail["category"] = meta["category"]
+            detail["homepage"] = meta["homepage"]
+        else:
+            detail["source"] = "custom"
+            detail["capabilities"] = []
+        # merge permissions from config
+        servers = cfg.get("mcp", {}).get("servers", {})
+        server_cfg = servers.get(name)
+        if server_cfg and "permissions" in server_cfg:
+            detail["permissions"] = server_cfg["permissions"]
+        return detail
+
+    # ── MCP Catalog ─────────────────────────────────────────────
+
+    @app.get("/api/mcp/catalog")
+    def get_mcp_catalog():
+        from .core.providers.catalog import get_catalog_serializable
+        return get_catalog_serializable()
+
+    # ── MCP Test ────────────────────────────────────────────────
+
+    @app.post("/api/mcp/test")
+    def test_mcp_connection(body: dict):
+        name = body.get("name", "")
+        if not name:
+            return {"ok": False, "error": "name required"}
+        servers = cfg.get("mcp", {}).get("servers", {})
+        server_cfg = servers.get(name)
+        if not server_cfg:
+            return {"ok": False, "error": f"server '{name}' not found in config"}
+        try:
+            from .core.mcp_host import MCPHost
+            import asyncio
+            mcp = MCPHost({"servers": {name: server_cfg}})
+            async def _test():
+                await mcp.connect({name: server_cfg})
+                wrappers = await mcp.get_tool_wrappers()
+                await mcp.disconnect()
+                return len(wrappers)
+            count = asyncio.run(_test())
+            return {"ok": True, "tools": count}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
     # ── Attachments ────────────────────────────────────────────
 
     ATTACHMENTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -623,6 +832,8 @@ def create_app(cfg: dict | None = None) -> FastAPI:
                     session.stop()
                 elif mtype == "permission_response":
                     session.answer_permission(msg.get("allowed", False))
+                elif mtype == "plan_response":
+                    session.answer_plan(msg.get("approved", False))
                 elif mtype == "reset":
                     if not session.busy:
                         session.runtime.reset()
