@@ -1073,3 +1073,113 @@ Agent thread calls permission_callback(tool, args, agent)
 - Fallback defaults to research (safe: web search vs. silent hallucination)
 
 **Files changed**: `cozmo/core/runtime.py`
+
+---
+
+### 2026-07-12 — WebUI: Code Mode redesign + Collab mode + Project management
+
+**Context**: Three major phases: (1) Code Mode UI overhaul with tool events, terminal/diff/trace panels, inline diffs, directory picker, permission modes. (2) Collab mode runtime + frontend (plan approval flow). (3) Collab Project Management — create, import, select projects with full wizard UI.
+
+---
+
+#### Part 1: Code Mode — Tool events + Panels
+
+**Backend** (`runtime.py`):
+- `_compute_diff()` — line-by-line diff from old/new file content
+- `run_stream()` now yields `tool_call`/`tool_result` events with diffs
+- `_check_permission()` — 5 permission modes: `manual`, `plan`, `accept-edits`, `auto`, `bypass`
+
+**Server** (`webui_server.py`):
+- Forwards `tool_call`/`tool_result` events to WebSocket
+- `set_directory` handler — accepts path, creates `ProjectIndex`, sets runtime context
+- `set_permission_mode` handler — sets runtime permission mode
+
+**Frontend types** (`types/index.ts`):
+- `DiffData`, `TerminalEntry`, `DiffEntry` — panel data structures
+
+**Frontend services** (`services/cozmo.ts`):
+- `tool_call`, `tool_result`, `directory_set` server events
+- `setDirectory()`, `setPermissionMode()` client methods
+
+**Hook** (`useCozmoChat.ts`):
+- `terminalEntries`, `diffEntries`, `currentDirectory`, `permissionMode` state
+- Auto-switch right panel tab on new terminal/diff activity
+
+**New components**:
+- `FileChangeCard.tsx` — Expandable diff view (+/- lines, syntax highlighted)
+- `TerminalPanel.tsx` — Filtered tool output list with colored badges per tool type
+- `DiffPanel.tsx` — Cumulative session file changes, collapsed list with expand
+- `RightPanel.tsx` — Tabbed container (Terminal / Diff / Trace)
+- `DirectoryPicker.tsx` — Button with popup: recent directories (localStorage), Browse via `webkitdirectory`, manual path input
+- `PermissionModeSelector.tsx` — 5-mode dropdown (Manual / Plan / Accept edits / Auto / Bypass)
+
+**Updated**:
+- `App.tsx` — RightPanel wired for code mode, auto-tab-switch
+- `Conversation.tsx` — Passes new props, shows FileChangeCards on last assistant message
+- `PromptInput.tsx` — Directory + PermissionMode controls visible in code mode
+
+---
+
+#### Part 2: Collab mode
+
+**Backend** (`runtime.py`):
+- `run_stream()` yields `plan` event with text + `plan_request` flag
+- `answer_plan(approved)` — resumes or aborts the run
+
+**Server** (`webui_server.py`):
+- Forwards `plan` events, handles `plan_response` WS messages
+
+**Frontend**:
+- `PlanCard` rendered in activity panel with approve/reject buttons
+- `useCozmoChat` — plan state + `answerPlan()` callback
+
+---
+
+#### Part 3: Collab Project Management
+
+**Backend** (`webui_server.py`):
+- `list_projects` — search/filter projects from `~/.cozmo/projects/index.json`
+- `get_recent_conversations` — recent conversations by mode, sorted by updatedAt
+- `import_from_chat` — extracts context from `.md` files, creates project directly (title from first conv, instructions from content, indexes files)
+- `create_project` — validates name+location, creates dir, saves instructions+seed files, indexes via `ProjectIndex`, stores project record, sets as active context
+- `select_project` — looks up project by id, injects `sharedContext` into runtime
+- `POST /api/directory-picker` — opens native OS folder dialog via `tkinter.filedialog.askdirectory()`, returns real filesystem path
+- Protocol doc: 6 new server events (`projects_list`, `recent_conversations`, `project_created`, `project_selected`)
+
+**Frontend types** (`types/index.ts`):
+- `CollabProjectFile`, `CollabProjectCreate` interfaces
+
+**Frontend services** (`services/cozmo.ts`):
+- 6 new client methods (`listProjects`, `getRecentConversations`, `importFromChat`, `createProject`, `selectProject`)
+- 5 new server event union members
+
+**Hook** (`useCozmoChat.ts`):
+- `collabProject`, `recentConversations` state
+- `collabCreateProject`, `selectProject`, `listProjects`, `importFromChat` handlers
+- `project_created` handler updates both `collabProject` and `projects` list
+
+**New components**:
+- `CollabProjectPopup.tsx` — Dropdown positioned above toolbar button: search projects, select existing, or choose action
+- `CreateProjectWizard.tsx` — Single-page modal: name, description, instructions, seed files (dropzone), location (Browse via server dialog). Preview shows `{path}/{name}/`
+- `ImportFromChatPopup.tsx` — Fetches all conversations from `GET /api/conversations`, shows expandable items (▶ toggle), message previews with user/assistant icons, checkbox per conversation
+
+**Wiring** (`PromptInput.tsx`, `Conversation.tsx`, `App.tsx`):
+- Collab mode shows `[📁 Project Name]` button in toolbar
+- Click opens dropdown, wrapped in `relative` container for absolute positioning
+- Create + Import modals portaled to `document.body` via `createPortal` for true `fixed` centering
+- `data-modal` attribute on modals prevents click-outside-close from closing the dropdown
+
+**Bug fixes in this session**:
+- `project_created` sent partial fields → now sends full project object
+- "Import from Chat" went nowhere → backend now creates project directly in one step
+- `_conversations_idx()` called N times in loop → moved outside with lookup map
+- Modals clipped by parent stacking context → portaled to `document.body`
+- CollabProjectPopup was full-screen modal → converted to dropdown (absolute, no backdrop, click-outside-close)
+- Mousedown on portaled modals closed the dropdown → `data-modal` attribute filter added
+- Browse buttons used `webkitdirectory` (folder name only) → replaced with server-side `tkinter.filedialog.askdirectory()` returning real path
+
+**Files created**: `RightPanel.tsx`, `TerminalPanel.tsx`, `DiffPanel.tsx`, `FileChangeCard.tsx`, `DirectoryPicker.tsx`, `PermissionModeSelector.tsx`, `CollabProjectPopup.tsx`, `CreateProjectWizard.tsx`, `ImportFromChatPopup.tsx`
+
+**Files modified**: `runtime.py`, `webui_server.py`, `types/index.ts`, `cozmo.ts`, `useCozmoChat.ts`, `App.tsx`, `Conversation.tsx`, `PromptInput.tsx`, `PLAN.md`
+
+**Verified**: TypeScript compiles clean, Vite build succeeds, Python syntax OK.

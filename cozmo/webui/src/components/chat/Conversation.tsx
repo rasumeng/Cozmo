@@ -1,11 +1,13 @@
 import { useEffect, useRef, useState } from 'react'
 import { Sparkles, PanelRightClose, PanelRightOpen } from 'lucide-react'
-import { Conversation as ConversationType, Attachment, Project } from '@/types'
+import { Conversation as ConversationType, Attachment, Project, CollabProjectFile } from '@/types'
 import { ConnectionState } from '@/services/cozmo'
 import type { SectionId } from '@/components/settings/SettingsModal'
 import { MessageBubble } from './MessageBubble'
+import { FileChangeCard } from './FileChangeCard'
 import { PromptInput } from './PromptInput'
 import { LandingPage } from './LandingPage'
+import { DiffEntry } from '@/types'
 
 interface Props {
   conversation: ConversationType
@@ -23,6 +25,16 @@ interface Props {
   onCreateSkillTrigger?: () => void
   pendingSkillTrigger?: boolean
   onConsumeSkillTrigger?: () => void
+  currentDirectory?: string
+  onSetDirectory?: (path: string) => void
+  permissionMode?: string
+  onSetPermissionMode?: (mode: string) => void
+  diffEntries?: DiffEntry[]
+  collabProject?: Project | null
+  onListProjects?: (search?: string) => void
+  onSelectProject?: (id: string) => void
+  onCreateProject?: (data: { name: string; description: string; instructions: string; files: CollabProjectFile[]; location: string }) => void
+  onImportChat?: (ids: string[]) => void
 }
 
 const CONNECTION_LABEL: Record<ConnectionState, { text: string; dot: string }> = {
@@ -47,6 +59,16 @@ export function Conversation({
   onCreateSkillTrigger,
   pendingSkillTrigger,
   onConsumeSkillTrigger,
+  currentDirectory,
+  onSetDirectory,
+  permissionMode,
+  onSetPermissionMode,
+  diffEntries,
+  collabProject,
+  onListProjects,
+  onSelectProject,
+  onCreateProject,
+  onImportChat,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const [suggestionText, setSuggestionText] = useState('')
@@ -88,8 +110,23 @@ export function Conversation({
           {conversation.messages.length === 0 ? (
             <LandingPage mode={conversation.mode} onSuggestion={setSuggestionText} />
           ) : (
-            conversation.messages.map((m) => (
-              <MessageBubble key={m.id} message={m} />
+            conversation.messages.map((m, i) => (
+              <div key={m.id}>
+                <MessageBubble message={m} />
+                {i === conversation.messages.length - 1 && m.role === 'assistant' && diffEntries && diffEntries.length > 0 && (
+                  <div className="mt-2 space-y-1.5">
+                    {diffEntries.map(de => (
+                      <FileChangeCard
+                        key={de.id}
+                        path={de.path}
+                        added={de.added}
+                        removed={de.removed}
+                        diff={de.diff}
+                      />
+                    ))}
+                  </div>
+                )}
+              </div>
             ))
           )}
         </div>
@@ -103,6 +140,7 @@ export function Conversation({
             onSend={(content, attachments) => { setSuggestionText(''); onSend(content, attachments) }}
             onStop={onStop}
             activeConversationId={activeConversationId}
+            mode={conversation.mode}
             projects={projects}
             onAddToProject={onAddToProject}
             onOpenProjectPanel={onOpenProjectPanel}
@@ -111,6 +149,15 @@ export function Conversation({
             pendingSkillTrigger={pendingSkillTrigger}
             onConsumeSkillTrigger={onConsumeSkillTrigger}
             suggestion={suggestionText}
+            currentDirectory={currentDirectory}
+            onSetDirectory={onSetDirectory}
+            permissionMode={permissionMode}
+            onSetPermissionMode={onSetPermissionMode}
+            collabProject={collabProject}
+            onListProjects={onListProjects}
+            onSelectProject={onSelectProject}
+            onCreateProject={onCreateProject}
+            onImportChat={onImportChat}
           />
         </div>
       </div>

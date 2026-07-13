@@ -1,10 +1,13 @@
 import re
 import json
+import logging
 import urllib.request
 import urllib.parse
 from datetime import datetime, timezone
 
 from . import register_tool
+
+log = logging.getLogger("cozmo.search")
 
 
 def _search_searxng(query: str, max_results: int = 5, timelimit: str = None) -> list[dict]:
@@ -40,7 +43,8 @@ def _search_searxng(query: str, max_results: int = 5, timelimit: str = None) -> 
                 "snippet": item.get("content", ""),
             })
         return results
-    except Exception:
+    except Exception as e:
+        log.warning("SearXNG search failed: %s", e)
         return []
 
 
@@ -48,7 +52,7 @@ def _search_searxng(query: str, max_results: int = 5, timelimit: str = None) -> 
 def web_search(query: str, max_results: int = 5, timelimit: str = None) -> str:
     """Search the web for current information. Returns date-stamped results with title + snippet + URL.
 
-    Uses SearXNG when available, falls back to DuckDuckGo.
+    Uses SearXNG (self-hosted) for all searches.
 
     Args:
         query: Search query
@@ -59,18 +63,7 @@ def web_search(query: str, max_results: int = 5, timelimit: str = None) -> str:
 
     results = _search_searxng(query, max_results, timelimit)
     if not results:
-        try:
-            from ddgs import DDGS
-            with DDGS() as ddgs:
-                kwargs = {"query": query, "max_results": max_results}
-                if timelimit:
-                    kwargs["timelimit"] = timelimit
-                results = list(ddgs.text(**kwargs))
-        except Exception as e:
-            return f"Error searching web: {e}"
-
-    if not results:
-        return f"Search performed: {search_date}\nNo results found."
+        return "Web search unavailable: SearXNG returned no results (is the SearXNG container running?)"
     lines = [f"Search performed: {search_date}"]
     for i, r in enumerate(results, 1):
         title = r.get("title", r.get("title", ""))

@@ -1,13 +1,20 @@
 // WebSocket client for the Cozmo FastAPI backend (cozmo/webui_server.py).
 // Reconnects automatically; events are fanned out to a single handler.
 
-import { Conversation, Attachment, Project, Skill, McpCatalogEntry, McpStatusResponse, McpServerDetail } from '@/types'
+import { Conversation, Attachment, Project, Skill, McpCatalogEntry, McpStatusResponse, McpServerDetail, DiffData, CollabProjectCreate } from '@/types'
 
 export type ServerEvent =
   | { type: 'token'; text: string }
   | { type: 'thinking'; text: string; detail?: string; query?: string }
   | { type: 'status'; text: string; detail?: string; query?: string }
   | { type: 'plan'; plan: string }
+  | { type: 'tool_call'; tool: string; args: Record<string, unknown>; id: string }
+  | { type: 'tool_result'; tool: string; result: string; id: string; diff?: DiffData }
+  | { type: 'directory_set'; path: string; indexed: number }
+  | { type: 'projects_list'; projects: Project[] }
+  | { type: 'recent_conversations'; conversations: { id: string; title: string; mode: string; updatedAt: string }[] }
+  | { type: 'project_created'; project: Project; indexed: number }
+  | { type: 'project_selected'; project: Project }
   | { type: 'permission_request'; tool: string; args: Record<string, unknown> }
   | { type: 'done' }
   | { type: 'error'; text: string }
@@ -83,6 +90,27 @@ export class CozmoClient {
   }
   answerPlan(approved: boolean) {
     return this.send({ type: 'plan_response', approved })
+  }
+  setDirectory(path: string) {
+    return this.send({ type: 'set_directory', path })
+  }
+  setPermissionMode(mode: string) {
+    return this.send({ type: 'set_permission_mode', mode })
+  }
+  listProjects(search?: string) {
+    return this.send({ type: 'list_projects', search })
+  }
+  getRecentConversations(mode?: string, limit?: number) {
+    return this.send({ type: 'get_recent_conversations', mode, limit })
+  }
+  importFromChat(conversationIds: string[]) {
+    return this.send({ type: 'import_from_chat', conversation_ids: conversationIds })
+  }
+  createProject(data: CollabProjectCreate) {
+    return this.send({ type: 'create_project', ...data })
+  }
+  selectProject(projectId: string) {
+    return this.send({ type: 'select_project', project_id: projectId })
   }
   reset() {
     return this.send({ type: 'reset' })

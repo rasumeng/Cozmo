@@ -1,8 +1,11 @@
 import { useEffect, useState, useRef, useCallback } from 'react'
-import { Paperclip, ArrowUp, Square, Mic, Plus, Folder, Puzzle, Cable, X, ChevronRight, Settings } from 'lucide-react'
-import { Attachment, Project, Skill } from '@/types'
+import { Paperclip, ArrowUp, Square, Mic, Plus, Folder, Puzzle, Cable, X, ChevronRight, Settings, FolderOpen } from 'lucide-react'
+import { Attachment, Project, Skill, WorkspaceMode, CollabProjectFile } from '@/types'
 import { fetchSkills } from '@/services/cozmo'
 import type { SectionId } from '@/components/settings/SettingsModal'
+import { DirectoryPicker } from './DirectoryPicker'
+import { PermissionModeSelector } from './PermissionModeSelector'
+import { CollabProjectPopup } from './CollabProjectPopup'
 
 const API_BASE = import.meta.env.DEV ? 'http://localhost:8765' : ''
 
@@ -52,6 +55,7 @@ interface Props {
   onSend: (content: string, attachments?: Attachment[]) => void
   onStop: () => void
   activeConversationId?: string
+  mode?: WorkspaceMode
   projects?: Project[]
   onAddToProject?: (convId: string, projId: string) => void
   onOpenProjectPanel?: () => void
@@ -60,6 +64,15 @@ interface Props {
   pendingSkillTrigger?: boolean
   onConsumeSkillTrigger?: () => void
   suggestion?: string
+  currentDirectory?: string
+  onSetDirectory?: (path: string) => void
+  permissionMode?: string
+  onSetPermissionMode?: (mode: string) => void
+  collabProject?: Project | null
+  onListProjects?: (search?: string) => void
+  onSelectProject?: (id: string) => void
+  onCreateProject?: (data: { name: string; description: string; instructions: string; files: CollabProjectFile[]; location: string }) => void
+  onImportChat?: (ids: string[]) => void
 }
 
 export function PromptInput({
@@ -68,6 +81,7 @@ export function PromptInput({
   onSend,
   onStop,
   activeConversationId,
+  mode = 'chat',
   projects = [],
   onAddToProject,
   onOpenProjectPanel,
@@ -76,10 +90,20 @@ export function PromptInput({
   pendingSkillTrigger,
   onConsumeSkillTrigger,
   suggestion,
+  currentDirectory,
+  onSetDirectory,
+  permissionMode,
+  onSetPermissionMode,
+  collabProject,
+  onListProjects,
+  onSelectProject,
+  onCreateProject,
+  onImportChat,
 }: Props) {
   const [value, setValue] = useState('')
   const [menuOpen, setMenuOpen] = useState(false)
   const [activeSubmenu, setActiveSubmenu] = useState<string | null>(null)
+  const [showCollabPopup, setShowCollabPopup] = useState(false)
   const [micState, setMicState] = useState<'idle' | 'listening' | 'recording'>('idle')
   const micStateRef = useRef<'idle' | 'listening' | 'recording'>('idle')
   const recognitionRef = useRef<SpeechRecognition | null>(null)
@@ -555,6 +579,35 @@ export function PromptInput({
               <span className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-red-400" />
             )}
           </button>
+          {mode === 'code' && onSetDirectory && (
+            <DirectoryPicker path={currentDirectory || './'} onChange={onSetDirectory} />
+          )}
+          {mode === 'code' && onSetPermissionMode && (
+            <PermissionModeSelector mode={permissionMode || 'manual'} onChange={onSetPermissionMode} />
+          )}
+          {mode === 'collab' && onListProjects && (
+            <div className="relative">
+              <button
+                onClick={() => setShowCollabPopup(v => !v)}
+                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-medium text-base-300 hover:bg-base-800 hover:text-base-100 transition-colors"
+              >
+                <FolderOpen size={13} />
+                {collabProject ? collabProject.name : 'No Project'}
+              </button>
+              {showCollabPopup && (
+                <CollabProjectPopup
+                  collabProject={collabProject || null}
+                  projects={projects}
+                  onClose={() => setShowCollabPopup(false)}
+                  onSelectProject={(id) => onSelectProject?.(id)}
+                  onListProjects={(s) => onListProjects(s)}
+                  onCreateProject={(d) => onCreateProject?.(d)}
+                  onImportChat={(ids) => onImportChat?.(ids)}
+                  onSetDirectory={(p) => onSetDirectory?.(p)}
+                />
+              )}
+            </div>
+          )}
         </div>
 
         <button

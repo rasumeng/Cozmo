@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Conversation, ActivityStep, WorkspaceMode, Attachment, Project, PlanData } from '@/types'
+import { Conversation, ActivityStep, WorkspaceMode, Attachment, Project, PlanData, TerminalEntry, DiffEntry, CollabProjectCreate } from '@/types'
 import { CozmoClient, ConnectionState, ServerEvent, fetchConversations, saveConversation, deleteConversationApi, fetchProjects, createProject, updateProject, deleteProjectApi, fetchProjectConversations } from '@/services/cozmo'
 
 export interface PermissionRequest {
@@ -23,6 +23,12 @@ export function useCozmoChat() {
   const [activity, setActivity] = useState<ActivityStep[]>([])
   const [permission, setPermission] = useState<PermissionRequest | null>(null)
   const [plan, setPlan] = useState<PlanData | null>(null)
+  const [terminalEntries, setTerminalEntries] = useState<TerminalEntry[]>([])
+  const [diffEntries, setDiffEntries] = useState<DiffEntry[]>([])
+  const [currentDirectory, setCurrentDirectory] = useState('./')
+  const [permissionMode, setPermissionMode] = useState('manual')
+  const [recentConversations, setRecentConversations] = useState<{ id: string; title: string; mode: string; updatedAt: string }[]>([])
+  const [collabProject, setCollabProject] = useState<Project | null>(null)
   const [draftMode, setDraftMode] = useState<WorkspaceMode>('chat')
   const [projects, setProjects] = useState<Project[]>([])
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null)
@@ -140,6 +146,45 @@ export function useCozmoChat() {
         case 'plan':
           setPlan({ plan: ev.plan, status: 'pending' })
           break
+        case 'tool_call':
+          setTerminalEntries(prev => [...prev, {
+            id: ev.id, tool: ev.tool, args: ev.args, result: '', diff: undefined, timestamp: Date.now()
+          }])
+          if (ev.tool === 'edit_file' || ev.tool === 'write_file') {
+            const path = (ev.args as Record<string, unknown>).path as string || 'unknown'
+            setDiffEntries(prev => [...prev, {
+              id: ev.id, path, added: 0, removed: 0,
+              diff: { text: '', added: 0, removed: 0 },
+              timestamp: Date.now()
+            }])
+          }
+          break
+        case 'tool_result':
+          setTerminalEntries(prev => prev.map(e =>
+            e.id === ev.id ? { ...e, result: ev.result, diff: ev.diff } : e
+          ))
+          if (ev.diff) {
+            setDiffEntries(prev => prev.map(e =>
+              e.id === ev.id ? { ...e, added: ev.diff!.added, removed: ev.diff!.removed, diff: ev.diff! } : e
+            ))
+          }
+          break
+        case 'directory_set':
+          setCurrentDirectory(ev.path)
+          break
+        case 'projects_list':
+          setProjects(ev.projects)
+          break
+        case 'recent_conversations':
+          setRecentConversations(ev.conversations)
+          break
+        case 'project_created':
+          setCollabProject(ev.project)
+          setProjects(prev => [ev.project, ...prev])
+          break
+        case 'project_selected':
+          setCollabProject(ev.project)
+          break
         case 'permission_request':
           setPermission({ tool: ev.tool, args: ev.args })
           break
@@ -240,12 +285,47 @@ export function useCozmoChat() {
     }
   }, [])
 
+  const setDirectory = useCallback((path: string) => {
+    clientRef.current?.setDirectory(path)
+  }, [])
+
+  const handleSetPermissionMode = useCallback((mode: string) => {
+    setPermissionMode(mode)
+    clientRef.current?.setPermissionMode(mode)
+  }, [])
+
+  const clearTerminal = useCallback(() => {
+    setTerminalEntries([])
+  }, [])
+
+  const handleListProjects = useCallback((search?: string) => {
+    clientRef.current?.listProjects(search)
+  }, [])
+
+  const handleGetRecentConversations = useCallback((mode?: string, limit?: number) => {
+    clientRef.current?.getRecentConversations(mode, limit)
+  }, [])
+
+  const handleImportFromChat = useCallback((conversationIds: string[]) => {
+    clientRef.current?.importFromChat(conversationIds)
+  }, [])
+
+  const handleCollabCreateProject = useCallback((data: CollabProjectCreate) => {
+    clientRef.current?.createProject(data)
+  }, [])
+
+  const handleSelectProject = useCallback((projectId: string) => {
+    clientRef.current?.selectProject(projectId)
+  }, [])
+
   const newChat = useCallback((mode: WorkspaceMode = 'chat') => {
     if (generating) return
     clientRef.current?.reset()
     setDraftMode(mode)
     setActiveId(DRAFT_ID)
     setActivity([])
+    setTerminalEntries([])
+    setDiffEntries([])
   }, [generating])
 
   const pinConversation = useCallback((id: string) => {
@@ -320,10 +400,24 @@ export function useCozmoChat() {
     activity,
     plan,
     permission,
+    terminalEntries,
+    diffEntries,
+    currentDirectory,
+    permissionMode,
+    recentConversations,
+    collabProject,
     sendMessage,
+    setPermissionMode: handleSetPermissionMode,
+    listProjects: handleListProjects,
+    getRecentConversations: handleGetRecentConversations,
+    importFromChat: handleImportFromChat,
+    collabCreateProject: handleCollabCreateProject,
+    selectProject: handleSelectProject,
     stop,
     answerPermission,
     answerPlan,
+    setDirectory,
+    clearTerminal,
     newChat,
     pinConversation,
     renameConversation,

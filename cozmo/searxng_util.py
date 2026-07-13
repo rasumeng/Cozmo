@@ -40,7 +40,7 @@ def start_searxng(port: int = SEARXNG_PORT) -> bool:
     """Start SearXNG container if Docker is available."""
     if not is_docker_available():
         print("Docker not available. SearXNG will not be auto-started.")
-        print("Install Docker or use DuckDuckGo backend instead.")
+        print("Install Docker to enable web search (SearXNG).")
         return False
 
     if is_searxng_running(port):
@@ -50,31 +50,68 @@ def start_searxng(port: int = SEARXNG_PORT) -> bool:
     print(f"Starting SearXNG on port {port}...")
 
     try:
-        subprocess.run(
-            [
-                "docker", "run", "-d",
-                "--name", SEARXNG_CONTAINER,
-                "-p", f"{port}:8080",
-                "-e", "SEARXNG_BASE_URL=http://localhost:8080/",
-                "--restart", "unless-stopped",
-                SEARXNG_IMAGE,
-            ],
+        existing = subprocess.run(
+            ["docker", "ps", "-a", "--filter", f"name={SEARXNG_CONTAINER}", "--format", "{{.Names}}"],
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=10,
         )
+        container_exists = SEARXNG_CONTAINER in existing.stdout.splitlines()
 
-        for _ in range(10):
+        if container_exists:
+            result = subprocess.run(
+                ["docker", "start", SEARXNG_CONTAINER],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        else:
+            result = subprocess.run(
+                [
+                    "docker", "run", "-d",
+                    "--name", SEARXNG_CONTAINER,
+                    "-p", f"{port}:8080",
+                    "-e", "SEARXNG_BASE_URL=http://localhost:8080/",
+                    "--restart", "unless-stopped",
+                    SEARXNG_IMAGE,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+
+        if result.returncode != 0:
+            _print_docker_error(result.stderr)
+            return False
+
+        for _ in range(30):
             time.sleep(1)
             if is_searxng_running(port):
                 print(f"SearXNG started successfully on port {port}")
                 return True
 
-        print("SearXNG started but may not be ready yet. Check with: docker logs cozmo-searxng")
-        return True
-    except Exception as e:
-        print(f"Failed to start SearXNG: {e}")
+        print(f"SearXNG did not become ready within 30s. Check with: docker logs {SEARXNG_CONTAINER}")
         return False
+    except FileNotFoundError:
+        print("Failed to start SearXNG: Docker not installed or not running.")
+        return False
+    except Exception as e:
+        _print_docker_error(str(e))
+        return False
+
+
+def _print_docker_error(stderr: str):
+    """Print an actionable error message based on Docker stderr output."""
+    text = stderr or ""
+    lowered = text.lower()
+    if "is already in use" in lowered:
+        print(f"Failed to start SearXNG: container name conflict. Try: docker rm {SEARXNG_CONTAINER}")
+    elif "port is already allocated" in lowered or "bind" in lowered:
+        print("Failed to start SearXNG: port conflict. Change the SearXNG port in config or free the port.")
+    elif "cannot connect to the docker daemon" in lowered:
+        print("Failed to start SearXNG: Docker not installed or not running.")
+    else:
+        print(f"Failed to start SearXNG: {text.strip() or 'unknown error'}")
 
 
 def stop_searxng():

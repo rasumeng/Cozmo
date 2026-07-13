@@ -77,6 +77,30 @@ export interface PlanData {
   status: PlanStepStatus
 }
 
+export interface DiffData {
+  text: string
+  added: number
+  removed: number
+}
+
+export interface TerminalEntry {
+  id: string
+  tool: string
+  args: Record<string, unknown>
+  result: string
+  diff?: DiffData
+  timestamp: number
+}
+
+export interface DiffEntry {
+  id: string
+  path: string
+  added: number
+  removed: number
+  diff: DiffData
+  timestamp: number
+}
+
 export interface ToolInfo {
   id: string
   name: string
@@ -132,6 +156,19 @@ export interface McpServerStatus {
 
 export interface McpStatusResponse {
   [serverName: string]: McpServerStatus
+}
+
+export interface CollabProjectFile {
+  name: string
+  content: string
+}
+
+export interface CollabProjectCreate {
+  name: string
+  description?: string
+  instructions?: string
+  files?: CollabProjectFile[]
+  location: string
 }
 
 export interface McpServerDetail {

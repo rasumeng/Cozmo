@@ -1,3 +1,5 @@
+import copy
+import os
 from pathlib import Path
 import tomllib
 import tomli_w
@@ -31,10 +33,6 @@ DEFAULT_CONFIG = {
     "mcp": {
         "servers": {},
     },
-    "context": {
-        "max_history": 20,
-        "tool_response_max_chars": 2000,
-    },
     "runtime": {
         "lightweight_mode": False,
         "max_history": 10,
@@ -64,15 +62,43 @@ DEFAULT_CONFIG = {
     "telegram": {"enabled": False, "bot_token": "", "allowed_chat_ids": []},
 }
 
+def _resolve_paths(cfg: dict) -> dict:
+    workspace = cfg.get("workspace")
+    if isinstance(workspace, dict):
+        for key in ("path", "knowledge"):
+            value = workspace.get(key)
+            if value:
+                workspace[key] = str(Path(value).expanduser().resolve())
+    return cfg
+
+def _apply_env_overrides(cfg: dict) -> dict:
+    telegram = cfg.get("telegram")
+    if isinstance(telegram, dict):
+        env_token = os.getenv("COZMO_TELEGRAM_BOT_TOKEN")
+        if telegram.get("bot_token"):
+            print("Warning: telegram.bot_token found in config file; prefer the COZMO_TELEGRAM_BOT_TOKEN env var.")
+        if env_token:
+            telegram["bot_token"] = env_token
+    return cfg
+
 def load() -> dict:
     if CONFIG_PATH.exists():
-        with open(CONFIG_PATH, "rb") as f:
-            return tomllib.load(f)
-    return DEFAULT_CONFIG
+        try:
+            with open(CONFIG_PATH, "rb") as f:
+                cfg = tomllib.load(f)
+        except (tomllib.TOMLDecodeError, OSError) as e:
+            print(f"Warning: failed to parse config file {CONFIG_PATH}: {e}. Using defaults.")
+            cfg = copy.deepcopy(DEFAULT_CONFIG)
+    else:
+        cfg = copy.deepcopy(DEFAULT_CONFIG)
+    return _resolve_paths(_apply_env_overrides(cfg))
 
 def init() -> dict:
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    if not CONFIG_PATH.exists():
-        with open(CONFIG_PATH, "wb") as f:
-            tomli_w.dump(DEFAULT_CONFIG, f)
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        if not CONFIG_PATH.exists():
+            with open(CONFIG_PATH, "wb") as f:
+                tomli_w.dump(DEFAULT_CONFIG, f)
+    except (PermissionError, OSError) as e:
+        print(f"Warning: could not create config at {CONFIG_PATH}: {e}. Using defaults.")
     return load()

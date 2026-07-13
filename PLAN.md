@@ -389,10 +389,698 @@ SPRINT 5: Connectors frontend (∼1 day)
 
 ---
 
-## Key Architecture Decisions
+---
+
+## Phase 7: Code Mode UI Redesign — Coding Agent Aesthetic
+
+### Goal
+
+Make Code mode feel like a proper coding agent (Claude Code, Cursor, Windsurf) in the browser. The key gap: currently Code mode is Chat mode with different labels. No file visibility, no diff tracking, no command output panel.
+
+### Design Principles
+
+1. **Right panel is the hub** — Terminal, Diff, and Trace all live as tabs in the right panel. User chooses what to look at.
+2. **No file explorer** — replaced by a directory picker button above the input. Simple: pick a project directory, agent indexes it.
+3. **Lang-agnostic terminal** — all command output (bash, python, node, cargo, etc.) shows in the Terminal tab equally. `execute_python` is just another tool call.
+4. **Inline file change cards** — when agent edits a file, a small `> path (+X/-Y)` card appears in the chat message AND in the Diff tab. Expandable to full diff in both places.
+5. **Diffs scoped to current session** — Diff tab shows agent-made changes this session. Git history is accessible via `git_diff`/`git_log` tools.
+
+### Target Layout (Code Mode Only)
+
+```
+┌──────────┬──────────────────────────────────────┬──────────────────┐
+│          │                                      │                  │
+│ Sidebar  │         Main Chat Area               │  Right Panel     │
+│          │                                      │  (320px)         │
+│  Mode    │  messages + code blocks              │                  │
+│  Tabs    │  file change cards inline            │ [Term][Diff]     │
+│          │  (expandable `> path (+X/-Y)`)       │ [Trace]          │
+│  Conv    │                                      │                  │
+│  List    │                                      │  Terminal:       │
+│          │                                      │  all tool output │
+│          │                                      │  color-coded     │
+│          │                                      │  filter chips    │
+│          │                                      │  auto-scroll     │
+│          │                                      │                  │
+│          │                                      │  Diff:           │
+│          │                                      │  `> path(+X -Y)` │
+│          │                                      │  expand→full diff│
+│          │                                      │  session-scoped  │
+│          │                                      │                  │
+│          │                                      │  Trace:          │
+│          │                                      │  activity steps  │
+│          ├──────────────────────────────────────┤  (existing UI)   │
+│          │  📁 ./my-project        [Change]     │                  │
+│          │  Input: Ask Cozmo anything...        │                  │
+│          └──────────────────────────────────────┘                  │
+└──────────┴──────────────────────────────────────┴──────────────────┘
+```
+
+### Backend Changes
+
+#### 1. `cozmo/core/runtime.py` — Emit structured tool events
+
+In `run_stream()`, after each `_exec_tool()` call, yield structured events:
+
+```python
+# Before tool execution:
+yield ("tool_call", tool_name, tool_args, call_id)
+
+# After tool execution, compute diff for file ops:
+if name in ("edit_file", "write_file"):
+    diff = _compute_diff(name, args)  # unified diff text + added/removed counts
+yield ("tool_result", tool_name, result_text, call_id, diff)
+```
+
+Add `_compute_diff()`:
+```python
+def _compute_diff(name: str, args: dict) -> dict | None:
+    if name == "edit_file":
+        old = args.get("old_text", "").splitlines(keepends=True)
+        new = args.get("new_text", "").splitlines(keepends=True)
+        diff = list(difflib.unified_diff(old, new, fromfile=args["path"], tofile=args["path"], n=3))
+        text = "".join(diff[2:]) if len(diff) > 2 else ""
+        added = sum(1 for l in diff if l.startswith("+") and not l.startswith("+++"))
+        removed = sum(1 for l in diff if l.startswith("-") and not l.startswith("---"))
+        return {"text": text, "added": added, "removed": removed}
+    if name == "write_file":
+        new = args.get("content", "").splitlines()
+        return {"text": "\n".join(f"+{l}" for l in new), "added": len(new), "removed": 0}
+    return None
+```
+
+#### 2. `cozmo/webui_server.py` — Forward events + directory handler
+
+**New WebSocket events (server → client):**
+```json
+{"type": "tool_call", "tool": "edit_file", "args": {"path": "src/app.ts", ...}, "id": "call-0-edit"}
+{"type": "tool_result", "tool": "edit_file", "result": "Edited src/app.ts", "id": "call-0-edit", "diff": {"text": "@@ -1 +1 @@\n-old\n+new", "added": 1, "removed": 1}}
+{"type": "directory_set", "path": "/home/user/project", "indexed": 42}
+```
+
+**New WebSocket handler (client → server):**
+```python
+elif mtype == "set_directory":
+    path = msg.get("path", "")
+    session.runtime.set_project_context(path)
+    n = session.runtime.project_index.index_all() if session.runtime.project_index else 0
+    await ws.send_text(json.dumps({"type": "directory_set", "path": path, "indexed": n}))
+```
+
+ChatSession gets `_emit_tool_call()` and `_emit_tool_result()` wrappers.
+
+### Frontend Types
+
+#### `types/index.ts` additions:
+
+```typescript
+export interface DiffData {
+  text: string     // unified diff text (minus ---/+++ headers)
+  added: number
+  removed: number
+}
+
+export interface TerminalEntry {
+  id: string
+  tool: string
+  args: Record<string, unknown>
+  result: string
+  diff?: DiffData
+  timestamp: number
+}
+
+export interface DiffEntry {
+  id: string
+  path: string
+  added: number
+  removed: number
+  diff: DiffData
+  timestamp: number
+}
+```
+
+#### `services/cozmo.ts` — ServerEvent additions:
+
+```typescript
+| { type: 'tool_call'; tool: string; args: Record<string, unknown>; id: string }
+| { type: 'tool_result'; tool: string; result: string; id: string; diff?: DiffData }
+| { type: 'directory_set'; path: string; indexed: number }
+```
+
+### Components (New)
+
+#### `FileChangeCard.tsx`
+
+Reusable component for showing a file change inline. Used in both chat messages and Diff tab.
+
+```
+> src/app.ts (+12 -3)             ← collapsed state (default)
+  ┌─ unified diff ────────────┐
+  │ @@ -1,3 +1,4 @@           │  ← expanded state
+  │  import { foo }           │     syntax-highlighted
+  │ +import { bar }           │     green/red lines
+  │  export const x = ...     │
+  └───────────────────────────┘
+```
+
+Props:
+```typescript
+interface FileChangeCardProps {
+  path: string
+  added: number
+  removed: number
+  diff: DiffData
+}
+```
+
+#### `TerminalPanel.tsx`
+
+Scrollable list of all tool output with filter chips.
+
+```
+┌─ Terminal ─────────────────────────────────┐
+│ [All] [Shell] [Python] [Files] [Search]    │
+│ ────────────────────────────────────────── │
+│ > edit_file src/app.ts                     │
+│   Edited 3 lines in src/app.ts             │
+│                                            │
+│ > run_command python -m py_compile app.ts  │
+│   OK                                       │
+│                                            │
+│ > grep_search "TODO" .                     │
+│   src/utils.ts:42: TODO: optimize          │
+│                                            │
+│ ~ auto-scroll ▼  [Clear]                   │
+└────────────────────────────────────────────┘
+```
+
+- Filter chips: All, Shell, Python, Files, Search
+- Color-coded by tool type (shell=green, file ops=blue, search=yellow, git=purple)
+- Each entry: `> tool_name args` on one line, result below (truncated)
+- Right-click/copy on result text
+- Auto-scroll to bottom on new entry; manual scroll pauses auto-scroll
+- "Clear" button in bottom bar
+- Max scrollback: unbounded (clearable)
+
+#### `DiffPanel.tsx`
+
+Cumulative file changes from current session.
+
+```
+┌─ Diff ─────────────────────────────────────┐
+│ > src/app.ts (+12 -3)                      │
+│ > src/utils.ts (+5 -1)                     │
+│ > assets/image.png (+0 -0)                 │
+│                                            │
+│ (click any → expand full diff inline)      │
+└────────────────────────────────────────────┘
+```
+
+- Uses same `FileChangeCard` component as chat inline cards
+- Sorted by path, grouped by session (one session per message)
+- Auto-opens when new file change arrives (auto-switch tab)
+- Click to expand/collapse full diff
+
+#### `DirectoryPicker.tsx`
+
+Small bar above the input area.
+
+```
+📁 ./my-project                               [Change]
+```
+
+- Shows current working directory (shortened)
+- "Change" button → opens a modal with:
+  - Text input for path (with validation)
+  - Basic directory browser (read-only, expand folders)
+  - "Set Directory" button → sends `set_directory` WebSocket message
+  - Cancels closes modal
+- Backend auto-indexes on set, response shows `indexed: N` count
+
+#### `RightPanel.tsx`
+
+Tabbed container holding Terminal, Diff, and Trace.
+
+```
+┌─ RightPanel ───────────────────────────────┐
+│ [Terminal] [Diff]  [Trace]                 │
+│ ───────────────────────────────────────── │
+│ <active tab content>                        │
+└────────────────────────────────────────────┘
+```
+
+Props:
+```typescript
+interface RightPanelProps {
+  activeTab: 'terminal' | 'diff' | 'trace'
+  onTabChange: (tab: 'terminal' | 'diff' | 'trace') => void
+  terminalEntries: TerminalEntry[]
+  diffEntries: DiffEntry[]
+  activitySteps: ActivityStep[]
+  plan: PlanData | null
+  onApprovePlan: () => void
+  onRejectPlan: () => void
+  onClearTerminal: () => void
+}
+```
+
+**Auto-switch behavior:**
+- New `tool_call` received → if tab is Trace, switch to Terminal
+- New `edit_file`/`write_file` result received → if tab is Trace, switch to Diff
+- User manually switches tabs → stays on chosen tab until next message
+- On new message start → reset to Trace tab
+
+### Hook Changes (`useCozmoChat.ts`)
+
+New state:
+```typescript
+const [terminalEntries, setTerminalEntries] = useState<TerminalEntry[]>([])
+const [diffEntries, setDiffEntries] = useState<DiffEntry[]>([])
+const [currentDirectory, setCurrentDirectory] = useState<string>('./')
+```
+
+New event handlers:
+```typescript
+case 'tool_call':
+  setTerminalEntries(prev => [...prev, { id: ev.id, tool: ev.tool, args: ev.args, result: '', timestamp: Date.now() }])
+  break
+case 'tool_result':
+  setTerminalEntries(prev => prev.map(e =>
+    e.id === ev.id ? { ...e, result: ev.result, diff: ev.diff } : e
+  ))
+  if ((ev.tool === 'edit_file' || ev.tool === 'write_file') && ev.diff) {
+    setDiffEntries(prev => [...prev, {
+      id: ev.id,
+      path: (ev.args as any).path || 'unknown',
+      added: ev.diff!.added,
+      removed: ev.diff!.removed,
+      diff: ev.diff!,
+      timestamp: Date.now()
+    }])
+  }
+  break
+case 'directory_set':
+  setCurrentDirectory(ev.path)
+  break
+```
+
+New methods:
+```typescript
+const setDirectory = useCallback((path: string) => {
+  clientRef.current?.send({ type: 'set_directory', path })
+}, [])
+const clearTerminal = useCallback(() => {
+  setTerminalEntries([])
+}, [])
+```
+
+### Layout Changes
+
+#### `App.tsx`
+
+New state:
+```typescript
+const [rightTab, setRightTab] = useState<'terminal' | 'diff' | 'trace'>('trace')
+```
+
+Code mode renders RightPanel instead of ActivityPanel:
+```tsx
+{mode === 'code' && activityOpen && !showProjects ? (
+  <RightPanel
+    activeTab={rightTab}
+    onTabChange={setRightTab}
+    terminalEntries={chat.terminalEntries}
+    diffEntries={chat.diffEntries}
+    activitySteps={chat.activity}
+    plan={chat.plan}
+    onApprovePlan={() => chat.answerPlan(true)}
+    onRejectPlan={() => chat.answerPlan(false)}
+    onClearTerminal={chat.clearTerminal}
+  />
+) : activityOpen && !showProjects ? (
+  <ActivityPanel steps={chat.activity} plan={chat.plan} ... />
+)}
+```
+
+#### `Conversation.tsx`
+
+Add DirectoryPicker above PromptInput:
+```tsx
+{mode === 'code' && (
+  <DirectoryPicker path={chat.currentDirectory} onChange={chat.setDirectory} />
+)}
+<PromptInput ... />
+```
+
+#### `MessageBubble.tsx`
+
+After markdown content, render FileChangeCards for tool calls:
+```tsx
+{message.toolCalls?.filter(tc => ['edit_file', 'write_file'].includes(tc.tool)).map(tc => {
+  const tr = message.toolResults?.find(r => r.id === tc.id)
+  if (!tr?.diff) return null
+  return (
+    <FileChangeCard
+      key={tc.id}
+      path={(tc.args as any).path || 'unknown'}
+      added={tr.diff.added}
+      removed={tr.diff.removed}
+      diff={tr.diff}
+    />
+  )
+})}
+```
+
+### Implementation Order
+
+| Step | Files | What | Effort |
+|------|-------|------|--------|
+| 1 | `runtime.py` | Emit `tool_call`/`tool_result` with call_id + diff computation | Small |
+| 2 | `webui_server.py` | Forward tool events, add `set_directory`/`directory_set` handlers | Small |
+| 3 | `types/index.ts`, `cozmo.ts` | Add types + ServerEvent union members | Small |
+| 4 | `useCozmoChat.ts` | Handle new events, track terminal/diff state | Medium |
+| 5 | `FileChangeCard.tsx` | New component — expandable diff card | Small |
+| 6 | `TerminalPanel.tsx` | New component — filtered tool output list | Medium |
+| 7 | `DiffPanel.tsx` | New component — cumulative session diffs | Small |
+| 8 | `DirectoryPicker.tsx` | New component — cwd bar + change modal | Small |
+| 9 | `RightPanel.tsx` | New component — tabbed container with auto-switch | Small |
+| 10 | `App.tsx` | Layout: RightPanel vs ActivityPanel per mode | Small |
+| 11 | `Conversation.tsx` | Add DirectoryPicker above input | Small |
+| 12 | `MessageBubble.tsx` | Render FileChangeCards inline | Small |
+
+### Questions Before Implementation
+
+- [x] Diffs scoped to current session? **Yes**
+- [x] Terminal accumulates with Clear? **Yes**
+- [x] Auto-index on directory set? **Yes**
+- [x] File cards in both chat + diff tab? **Yes** — same component
+- [x] `> path (+X -Y)` format? **Yes**
+- [x] All tool output in terminal, not just commands? **Yes**
+- [x] Auto-switch tab based on event type? **Yes**
+
+---
+
+---
+
+## Phase 8: Per-Mode Input Bars + Collab Project Management
+
+### Goal
+
+Give each workspace mode its own tailored input bar instead of a one-size-fits-all PromptInput. Collab mode gets project management (create, import, select folder). Code mode keeps directory picker + permission mode (already built). Chat mode stays minimal.
+
+### Current Problem
+
+- `PromptInput` is a single component shared by all 3 modes
+- Directory picker + permission mode buttons appear in all modes (they should be code-only)
+- Collab mode has no project/folder awareness at all
+- No way to create projects from within the UI
+
+### Target Per-Mode Input Bars
+
+#### Chat Mode (no change from current)
+
+```
+┌──────────────────────────────────────┐
+│ textarea                              │
+├──────────────────────────────────────┤
+│ + (attach)              mic  send    │
+└──────────────────────────────────────┘
+```
+
+#### Code Mode (already implemented)
+
+```
+┌──────────────────────────────────────┐
+│ textarea                              │
+├──────────────────────────────────────┤
+│ + (attach)  [📁 path]  [🔒 Manual]  │
+│                          mic  send    │
+└──────────────────────────────────────┘
+```
+
+#### Collab Mode (new)
+
+```
+┌──────────────────────────────────────┐
+│ textarea                              │
+├──────────────────────────────────────┤
+│ + (attach)  [📁 Project Name]        │
+│                          mic  send    │
+└──────────────────────────────────────┘
+```
+
+The `[📁 Project Name]` button opens a project management popup.
+
+### Collab Project Management Popup
+
+```
+┌─ Work in a Project Folder ─────────────────┐
+│ 🔍 Search projects...                       │
+│ ─────────────────────────────────────────── │
+│                                             │
+│ MyAuthenticationSystem                      │
+│ ├── Description: Auth system for web app    │
+│ ├── Updated: 2h ago                         │
+│ └── [Select]                                │
+│                                             │
+│ BlogPlatform API                            │
+│ ├── Description: REST API for blog          │
+│ ├── Updated: 1d ago                         │
+│ └── [Select]                                │
+│                                             │
+│ ─────────────────────────────────────────── │
+│ [📁 Create New Project]                     │
+│ [💬 Import from Chat]                       │
+│ [📂 Use Existing Folder]                    │
+└─────────────────────────────────────────────┘
+```
+
+Three action buttons at the bottom:
+
+#### Action 1: Create New Project
+
+Multi-step wizard modal (like a 3-step form with Back/Next):
+
+```
+Step 1: Project Details
+┌──────────────────────────────────────┐
+│ Project Name *              [____]   │
+│ Instructions for Cozmo      [____]   │
+│   (how to work in this project)      │
+│ Brief description           [____]   │
+├──────────────────────────────────────┤
+│              [Cancel]  [Next →]      │
+└──────────────────────────────────────┘
+
+Step 2: Add Files
+┌──────────────────────────────────────┐
+│ Drag & drop files here or click to   │
+│ browse                               │
+│                                      │
+│ 📄 requirements.txt        [Remove]  │
+│ 📄 main.py                 [Remove]  │
+│ 📄 README.md               [Remove]  │
+├──────────────────────────────────────┤
+│          [← Back]  [Next →]         │
+└──────────────────────────────────────┘
+
+Step 3: Choose Location
+┌──────────────────────────────────────┐
+│ Project folder will be created at:   │
+│ [______________________________]     │
+│                                      │
+│ [Browse Folder]                      │
+│                                      │
+│ Will create: /path/to/projects/      │
+│              my-project-name/        │
+├──────────────────────────────────────┤
+│          [← Back]  [✨ Create]       │
+└──────────────────────────────────────┘
+```
+
+**Backend behavior:**
+1. Receives `create_project` WebSocket message with: `{name, instructions, files[], location}`
+2. Creates directory at `{location}/{name}`
+3. Saves uploaded files into the directory
+4. Creates a `.cozmo/project.json` metadata file
+5. Returns project metadata + triggers indexing
+6. Sets the new project as the current collab session context
+
+#### Action 2: Import from Chat
+
+```
+┌─ Import from Chat ────────────────────┐
+│ Select conversations to import context │
+│ from:                                 │
+│                                      │
+│ ☐ "Help me brainstorm a business..." │
+│   2h ago - Collab                    │
+│ ☐ "Write a marketing plan for..."    │
+│   5h ago - Chat                      │
+│ ☐ "Research competitors in..."       │
+│   1d ago - Chat                      │
+│                                      │
+│ Preview imported context:            │
+│ ┌──────────────────────────────┐    │
+│ │ Business idea: local coffee  │    │
+│ │ shop app. Key features:      │    │
+│ │ loyalty program, mobile      │    │
+│ │ ordering, rewards tracking.  │    │
+│ └──────────────────────────────┘    │
+│                                      │
+│ [Cancel]  [Import & Create Project]  │
+└──────────────────────────────────────┘
+```
+
+**Backend behavior:**
+1. Receives `import_from_chat` with `{conversation_ids[]}`
+2. Extracts key messages/context from each conversation
+3. Creates a new project with the extracted context as instructions
+4. Returns project metadata
+
+#### Action 3: Use Existing Folder
+
+```
+┌─ Use Existing Folder ────────────────┐
+│ Point Cozmo to an existing project    │
+│ directory:                           │
+│                                      │
+│ [______________________________]     │
+│ [Browse Folder]                      │
+│                                      │
+│ Recent:                              │
+│ /home/user/projects/my-app      [X] │
+│ /home/user/projects/blog-api    [X] │
+│                                      │
+│ Cozmo will index the project files   │
+│ and make them available as context.  │
+│                                      │
+│ [Cancel]  [Use This Folder]          │
+└──────────────────────────────────────┘
+```
+
+**Backend behavior:**
+1. Same as `set_directory` in code mode
+2. Creates a project record linked to the folder
+3. Indexes the folder
+4. Returns project metadata
+
+### Frontend Files
+
+| File | New/Change | Purpose |
+|------|-----------|---------|
+| `PromptInput.tsx` | **Change** | Accept `mode` prop; conditionally render mode-specific extensions in toolbar. Chat=none, Code=dir+permission, Collab=project button |
+| `CollabProjectPopup.tsx` | **New** | Main popup: search + project list + 3 action buttons |
+| `CreateProjectWizard.tsx` | **New** | 3-step wizard modal (details, files, location) |
+| `ImportFromChatPopup.tsx` | **New** | List recent conversations, select to import |
+| `Conversation.tsx` | **Change** | Pass `mode` to PromptInput |
+| `App.tsx` | **Change** | Pass collab project state through |
+
+### Backend Changes
+
+**WebSocket messages (client → server):**
+
+| Message Type | Payload | Purpose |
+|-------------|---------|---------|
+| `create_project` | `{name, instructions, files[], location}` | Create new project folder + index |
+| `import_from_chat` | `{conversation_ids[]}` | Extract context from past convos |
+| `list_projects` | `{search?}` | List/search projects |
+| `get_recent_conversations` | `{mode?, limit?}` | Get recent convos for import |
+| `use_folder` | `{path}` | Same as `set_directory` but creates project record |
+
+**WebSocket messages (server → client):**
+
+| Message Type | Payload | Purpose |
+|-------------|---------|---------|
+| `project_created` | `{id, name, path, indexed}` | Confirm project creation |
+| `projects_list` | `{projects[]}` | Project search results |
+| `recent_conversations` | `{conversations[]}` | For import picker |
+| `import_context` | `{text}` | Extracted context from selected convos |
+
+**File: `webui_server.py`**
+
+- Add handler for `create_project`:
+  ```python
+  elif mtype == "create_project":
+      name = msg["name"]
+      location = Path(msg["location"]) / name
+      location.mkdir(parents=True, exist_ok=True)
+      # Save instructions as .cozmo/project.json
+      # Save uploaded files
+      # Index the project directory
+      await ws.send_text(json.dumps({"type": "project_created", ...}))
+  ```
+
+- Add handler for `import_from_chat`:
+  ```python
+  elif mtype == "import_from_chat":
+      conv_ids = msg.get("conversation_ids", [])
+      # Read each conversation .md file
+      # Extract key messages
+      # Return combined context
+  ```
+
+- Add handler for `list_projects` (uses existing `_projects_idx()`)
+- Add handler for `get_recent_conversations` (uses existing `_conversations_idx()`)
+
+### Implementation Order
+
+| Step | Files | What | Effort |
+|------|-------|------|--------|
+| 1 | `webui_server.py` | Add `create_project`, `import_from_chat`, `list_projects`, `get_recent_conversations` handlers | Medium |
+| 2 | `types/index.ts`, `cozmo.ts` | Add new ServerEvent + message types | Small |
+| 3 | `useCozmoChat.ts` | Add project state, handler methods | Medium |
+| 4 | `PromptInput.tsx` | Add `mode` prop, conditionally render extensions | Small |
+| 5 | `CollabProjectPopup.tsx` | New: popup with search + project list + 3 actions | Medium |
+| 6 | `CreateProjectWizard.tsx` | New: 3-step wizard (details, files, location) | Large |
+| 7 | `ImportFromChatPopup.tsx` | New: recent conversation picker + context preview | Medium |
+| 8 | `App.tsx` + `Conversation.tsx` | Wire new props through | Small |
+| 9 | Full integration test | Verify all 3 modes have correct input bars | Small |
+
+### Component Tree (Collab Mode)
+
+```
+Conversation
+└── PromptInput (mode='collab')
+    ├── textarea
+    ├── attachment chips
+    └── toolbar
+        ├── + menu (existing)
+        ├── [📁 Project Name] button
+        │   └── CollabProjectPopup
+        │       ├── search input
+        │       ├── project list
+        │       ├── [Create New Project]
+        │       │   └── CreateProjectWizard (3-step modal)
+        │       ├── [Import from Chat]
+        │       │   └── ImportFromChatPopup
+        │       └── [Use Existing Folder]
+        │           └── DirectoryPicker inline
+        ├── mic button (existing)
+        └── send button (existing)
+```
+
+### Questions
+
+- [ ] Should project files uploaded during creation be stored server-side (in `~/.cozmo/projects/`) or on the user's chosen path?
+  → **Chosen path**. The location step lets user pick where the folder lives on their system.
+- [ ] Should "Import from Chat" create a project or just set context for the current session?
+  → **Create a project**. The imported context becomes the project instructions.
+- [ ] How do uploaded files in Step 2 of creation get saved?
+  → Files are uploaded via REST API (`POST /api/project-files`), stored in `~/.cozmo/temp-uploads/`, then moved to the new project directory on creation.
+- [ ] Should the collab project be persisted across sessions?
+  → **Yes**. Project metadata + indexed files persist in the chosen location.
+
+---
+
+## Key Architecture Decisions (Updated)
 
 1. **Attachments stored on disk**, metadata in conversation messages. No base64 in chat JSON.
 2. **Projects are lightweight groupings** — a project is a list of conversation IDs + shared context text. Conversations can belong to 0 or 1 projects.
 3. **Skills are SKILL.md files** on disk. The "Skill Creator" skill is just a well-written SKILL.md that tells the agent how to create other skills.
 4. **Connectors = MCP servers** already working on backend. Phase 5 is mainly frontend polish.
 5. **No database** — everything is file-based: `~/.cozmo/chats/`, `~/.cozmo/projects/`, `~/.cozmo/skills/`, `~/.cozmo/attachments/`.
+6. **Code mode diffs are session-scoped** — computed from tool args on the backend (Python `difflib.unified_diff`), not from git history. Git tools exist separately.
+7. **Terminal is lang-agnostic** — `execute_python` is just another tool call alongside `run_command`, `npm test`, `cargo build`, etc. No special treatment.
+8. **Collab project files live on the user's chosen path** — not in `~/.cozmo/`. The user picks where the project folder goes on their system.
+9. **Per-mode input bars share a single PromptInput component** with conditional rendering based on `mode` prop, rather than 3 separate components.

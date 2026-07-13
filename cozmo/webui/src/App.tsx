@@ -1,7 +1,8 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect, useRef } from 'react'
 import { Sidebar } from '@/components/sidebar/Sidebar'
 import { Conversation } from '@/components/chat/Conversation'
 import { ActivityPanel } from '@/components/activity/ActivityPanel'
+import { RightPanel } from '@/components/activity/RightPanel'
 import { PermissionModal } from '@/components/common/PermissionModal'
 import { ProjectsPanel } from '@/components/projects/ProjectsPanel'
 import { SettingsModal, SectionId } from '@/components/settings/SettingsModal'
@@ -15,7 +16,21 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [settingsSection, setSettingsSection] = useState<SectionId>('models')
   const [pendingSkillTrigger, setPendingSkillTrigger] = useState(false)
+  const [rightTab, setRightTab] = useState<'terminal' | 'diff' | 'trace'>('trace')
+  const prevTermLen = useRef(0)
+  const prevDiffLen = useRef(0)
   const chat = useCozmoChat()
+
+  useEffect(() => {
+    if (chat.active.mode !== 'code') return
+    if (chat.terminalEntries.length > prevTermLen.current && rightTab !== 'terminal') {
+      setRightTab('terminal')
+    } else if (chat.diffEntries.length > prevDiffLen.current && rightTab !== 'diff') {
+      setRightTab('diff')
+    }
+    prevTermLen.current = chat.terminalEntries.length
+    prevDiffLen.current = chat.diffEntries.length
+  }, [chat.terminalEntries.length, chat.diffEntries.length, chat.active.mode])
 
   const handleOpenSettings = useCallback((section?: SectionId) => {
     if (section) setSettingsSection(section)
@@ -82,9 +97,32 @@ export default function App() {
             onCreateSkillTrigger={() => setPendingSkillTrigger(true)}
             pendingSkillTrigger={pendingSkillTrigger}
             onConsumeSkillTrigger={() => setPendingSkillTrigger(false)}
+            currentDirectory={chat.currentDirectory}
+            onSetDirectory={chat.setDirectory}
+            permissionMode={chat.permissionMode}
+            onSetPermissionMode={chat.setPermissionMode}
+            diffEntries={chat.diffEntries}
+            collabProject={chat.collabProject}
+            onListProjects={chat.listProjects}
+            onSelectProject={chat.selectProject}
+            onCreateProject={chat.collabCreateProject}
+            onImportChat={chat.importFromChat}
           />
         )}
-        {activityOpen && !showProjects && (
+        {activityOpen && !showProjects && chat.active.mode === 'code' && (
+          <RightPanel
+            activeTab={rightTab}
+            onTabChange={setRightTab}
+            terminalEntries={chat.terminalEntries}
+            diffEntries={chat.diffEntries}
+            activitySteps={chat.activity}
+            plan={chat.plan}
+            onApprovePlan={() => chat.answerPlan(true)}
+            onRejectPlan={() => chat.answerPlan(false)}
+            onClearTerminal={chat.clearTerminal}
+          />
+        )}
+        {activityOpen && !showProjects && chat.active.mode !== 'code' && (
           <ActivityPanel
             steps={chat.activity}
             plan={chat.plan}

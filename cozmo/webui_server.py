@@ -7,12 +7,26 @@ WebSocket protocol (/ws/chat), JSON messages:
     {"type": "stop"}                                         abort the current run
     {"type": "permission_response", "allowed": bool}
     {"type": "plan_response", "approved": bool}
+    {"type": "set_directory", "path": "..."}                 set project directory (auto-indexes)
+    {"type": "set_permission_mode", "mode": "manual"}        set permission mode
+    {"type": "list_projects", "search?": "..."}               list/search projects
+    {"type": "get_recent_conversations", "mode?": "...", "limit?": N}  recent convos for import
+    {"type": "import_from_chat", "conversation_ids": [...]}   extract context from past convos
+    {"type": "create_project", "name", "instructions", "files[]", "location"}  create project
+    {"type": "select_project", "project_id": "..."}           set current collab project
     {"type": "reset"}                                        new chat (clears runtime history)
   server → client:
     {"type": "token",    "text": "..."}                      streamed answer token
     {"type": "thinking", "text": "..."}                      agent step (mode, tool runs)
     {"type": "status",   "text": "..."}                      transient status line
     {"type": "plan",     "plan": "..."}                      collab plan awaiting approval
+    {"type": "tool_call",  "tool": "...", "args": {...}, "id": "..."}
+    {"type": "tool_result", "tool": "...", "result": "...", "id": "...", "diff": {...}?}
+    {"type": "directory_set", "path": "...", "indexed": N}
+    {"type": "projects_list", "projects": [...]}
+    {"type": "recent_conversations", "conversations": [...]}
+    {"type": "project_created", "project": {...}, "indexed": N}
+    {"type": "project_selected", "project": {...}}
     {"type": "permission_request", "tool": "...", "args": {...}}
     {"type": "done"}                                         run finished
     {"type": "error",    "text": "..."}
@@ -44,48 +58,96 @@ ATTACHMENTS_DIR = Path.home() / ".cozmo" / "attachments"
 SKILLS_DIR = Path.home() / ".cozmo" / "skills"
 DEFAULT_SKILLS_DIR = Path(__file__).parent / "default_skills"
 
-# Module-level list of all MCPManagers so config-save can notify them
-_builtin_mcp_managers: list = []
+# The expensive backend (models, tool registry, MCP connections, memory,
+# skills) is built exactly once and shared by every WebSocket session.
+# Each session gets a cheap per-session CozmoRuntime that references it.
+_shared_backend: dict | None = None
+_backend_lock = threading.Lock()
+
+
+def get_backend(cfg: dict) -> dict:
+    """Build the shareable backend once; reuse it for every session.
+
+    Sharing the tool registry + MCP manager means MCP servers are launched
+    a single time for the whole process instead of once per browser tab.
+    """
+    global _shared_backend
+    with _backend_lock:
+        if _shared_backend is not None:
+            return _shared_backend
+
+        from .core.llm import OllamaModel
+        from .core.model_manager import ModelManager
+        from .memory.manager import MemoryManager
+        from .code_indexer import ProjectIndex
+        from .ollama_util import resolve_minicpm5
+        from .core.tool_registry import ToolRegistry
+        from .core.providers.mcp import MCPManager
+        from .core.runtime import _load_all_skills
+        from .tools import TOOL_REGISTRY
+
+        ollama_url = cfg.get("ollama", {}).get("url", "http://localhost:11434")
+        lightweight_model = resolve_minicpm5(ollama_url)
+        is_lightweight = cfg.get("runtime", {}).get("lightweight_mode", False)
+        mm = ModelManager(ollama_url, cfg.get("models", {}),
+                          lightweight_model=lightweight_model if is_lightweight else None)
+        router_llm = OllamaModel(lightweight_model, ollama_url)
+        memory = MemoryManager(router_llm, persist_dir=str(Path.home() / ".cozmo" / "memory"))
+        project_index = ProjectIndex(Path.cwd())
+
+        registry = ToolRegistry()
+        for name, fn in TOOL_REGISTRY.items():
+            registry.register(name, fn)
+
+        # One MCP manager for the whole process — persistent connections,
+        # launched once, kept alive across sessions.
+        mcp = MCPManager(registry)
+        try:
+            mcp.start(cfg)
+        except Exception as e:
+            print(f"[cozmo] MCP startup failed: {e}")
+
+        # Skills read from disk once, shared read-only across sessions.
+        skills = _load_all_skills()
+
+        _shared_backend = {
+            "model_manager": mm,
+            "router_llm": router_llm,
+            "memory": memory,
+            "project_index": project_index,
+            "registry": registry,
+            "mcp": mcp,
+            "skills": skills,
+        }
+        return _shared_backend
+
+
+def _safe_child(base: Path, name: str, suffix: str = "") -> Path:
+    """Resolve base/name+suffix and reject any path escaping base (traversal)."""
+    p = (base / f"{name}{suffix}").resolve()
+    if not p.is_relative_to(base.resolve()):
+        raise ValueError("invalid name")
+    return p
 
 def build_runtime(cfg: dict):
+    """Construct a per-session runtime cheaply from the shared backend.
+
+    Only the per-session state (history, callbacks, stop flag) is fresh;
+    models, tool registry, MCP connections, memory and skills are shared.
+    """
     from .core.runtime import CozmoRuntime
-    from .core.llm import OllamaModel
-    from .core.model_manager import ModelManager
-    from .memory.manager import MemoryManager
-    from .code_indexer import ProjectIndex
-    from .ollama_util import resolve_minicpm5
-    from .core.tool_registry import ToolRegistry
-    from .core.providers.mcp import MCPManager
-    from .tools import TOOL_REGISTRY
 
-    ollama_url = cfg.get("ollama", {}).get("url", "http://localhost:11434")
-    lightweight_model = resolve_minicpm5(ollama_url)
-    is_lightweight = cfg.get("runtime", {}).get("lightweight_mode", False)
-    mm = ModelManager(ollama_url, cfg.get("models", {}),
-                      lightweight_model=lightweight_model if is_lightweight else None)
-    router_llm = OllamaModel(lightweight_model, ollama_url)
-    memory = MemoryManager(router_llm, persist_dir=str(Path.home() / ".cozmo" / "memory"))
-    project_index = ProjectIndex(Path.cwd())
-
-    # Set up tool registry with builtins
-    registry = ToolRegistry()
-    for name, fn in TOOL_REGISTRY.items():
-        registry.register(name, fn)
-
-    # Start MCP connections (persistent background event loop)
-    mcp = MCPManager(registry)
-    mcp.start(cfg)
-    _builtin_mcp_managers.append(mcp)
-
+    b = get_backend(cfg)
     runtime = CozmoRuntime(
-        model_manager=mm,
-        memory=memory,
-        registry=registry,
-        project_index=project_index,
+        model_manager=b["model_manager"],
+        memory=b["memory"],
+        registry=b["registry"],
+        project_index=b["project_index"],
         cfg=cfg,
-        router_llm=router_llm,
+        router_llm=b["router_llm"],
+        skills=b["skills"],
     )
-    runtime._mcp_manager = mcp  # keep ref for lifecycle
+    runtime._mcp_manager = b["mcp"]  # shared; do NOT stop on session close
     return runtime
 
 
@@ -182,10 +244,21 @@ class ChatSession:
                     if self.stop_flag.is_set():
                         self._emit({"type": "thinking", "text": "Stopped by user", "detail": "Generation was cancelled by the user"})
                         break
-                    kind, text = item[0], item[1]
-                    detail = item[2] if len(item) > 2 else None
-                    query = item[3] if len(item) > 3 else None
-                    self._emit({"type": kind, "text": text, "detail": detail, "query": query})
+                    kind = item[0]
+                    if kind == "tool_call":
+                        _, name, args, call_id = item
+                        self._emit({"type": "tool_call", "tool": name, "args": args, "id": call_id})
+                    elif kind == "tool_result":
+                        _, name, result, call_id = item[:4]
+                        payload = {"type": "tool_result", "tool": name, "result": result, "id": call_id}
+                        if len(item) >= 5 and item[4] is not None:
+                            payload["diff"] = item[4]
+                        self._emit(payload)
+                    else:
+                        kind, text = item[0], item[1]
+                        detail = item[2] if len(item) > 2 else None
+                        query = item[3] if len(item) > 3 else None
+                        self._emit({"type": kind, "text": text, "detail": detail, "query": query})
             except Exception as e:
                 self._emit({"type": "error", "text": str(e)})
             finally:
@@ -199,6 +272,9 @@ class ChatSession:
         # unblock a pending permission prompt as a denial
         self._perm_allowed = False
         self._perm_event.set()
+        # unblock a pending plan-approval prompt as a rejection
+        self._plan_approved = False
+        self._plan_event.set()
 
 
 def create_app(cfg: dict | None = None) -> FastAPI:
@@ -257,7 +333,10 @@ def create_app(cfg: dict | None = None) -> FastAPI:
         ]
 
     def _load_messages(conv_id: str) -> list:
-        md_path = CHATS_DIR / f"{conv_id}.md"
+        try:
+            md_path = _safe_child(CHATS_DIR, conv_id, ".md")
+        except ValueError:
+            return []
         if not md_path.exists():
             return []
         content = md_path.read_text("utf-8")
@@ -309,6 +388,11 @@ def create_app(cfg: dict | None = None) -> FastAPI:
         if not conv_id:
             from fastapi.responses import JSONResponse
             return JSONResponse({"error": "id required"}, status_code=400)
+        try:
+            md_path = _safe_child(CHATS_DIR, conv_id, ".md")
+        except ValueError:
+            from fastapi.responses import JSONResponse
+            return JSONResponse({"error": "invalid id"}, status_code=400)
 
         ts = datetime.now(timezone.utc).isoformat()
         idx = _conversations_idx()
@@ -333,7 +417,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
 
         _save_idx(idx)
         # write .md file
-        (CHATS_DIR / f"{conv_id}.md").write_text(
+        md_path.write_text(
             _conv_to_file({"title": title, "mode": mode, "messages": messages}),
             "utf-8",
         )
@@ -369,7 +453,11 @@ def create_app(cfg: dict | None = None) -> FastAPI:
         idx = _conversations_idx()
         idx["conversations"] = [c for c in idx["conversations"] if c["id"] != conv_id]
         _save_idx(idx)
-        md_path = CHATS_DIR / f"{conv_id}.md"
+        try:
+            md_path = _safe_child(CHATS_DIR, conv_id, ".md")
+        except ValueError:
+            from fastapi.responses import JSONResponse
+            return JSONResponse({"error": "invalid id"}, status_code=400)
         if md_path.exists():
             md_path.unlink()
         return {"ok": True}
@@ -423,12 +511,14 @@ def create_app(cfg: dict | None = None) -> FastAPI:
         CONFIG_PATH = config.CONFIG_PATH
         CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
         CONFIG_PATH.write_text(tomli_w.dumps(cfg), "utf-8")
-        # notify all MCP managers so they sync their connections
-        for mcp in _builtin_mcp_managers:
+        # notify the shared MCP manager so it syncs its connections
+        with _backend_lock:
+            backend = _shared_backend
+        if backend:
             try:
-                mcp.refresh_from_config(cfg)
-            except Exception:
-                pass
+                backend["mcp"].refresh_from_config(cfg)
+            except Exception as e:
+                print(f"[cozmo] MCP config refresh failed: {e}")
         return {"ok": True}
 
     # ── Ollama available models ─────────────────────────────────
@@ -578,6 +668,20 @@ def create_app(cfg: dict | None = None) -> FastAPI:
         from fastapi.responses import JSONResponse
         return JSONResponse({"error": "not found"}, status_code=404)
 
+    @app.post("/api/directory-picker")
+    def directory_picker():
+        try:
+            import tkinter as tk
+            from tkinter import filedialog
+            root = tk.Tk()
+            root.withdraw()
+            root.attributes('-topmost', True)
+            path = filedialog.askdirectory()
+            root.destroy()
+            return {"path": path or ""}
+        except Exception as e:
+            return {"path": "", "error": str(e)}
+
     # ── Skills ────────────────────────────────────────────────
 
     @app.get("/api/skills")
@@ -610,7 +714,11 @@ def create_app(cfg: dict | None = None) -> FastAPI:
         if not name:
             from fastapi.responses import JSONResponse
             return JSONResponse({"error": "name required"}, status_code=400)
-        skill_dir = SKILLS_DIR / name
+        try:
+            skill_dir = _safe_child(SKILLS_DIR, name)
+        except ValueError:
+            from fastapi.responses import JSONResponse
+            return JSONResponse({"error": "invalid name"}, status_code=400)
         skill_dir.mkdir(parents=True, exist_ok=True)
         content = body.get("content") or ""
         desc = body.get("description", "")
@@ -623,7 +731,11 @@ def create_app(cfg: dict | None = None) -> FastAPI:
         content = await file.read()
         text = content.decode("utf-8")
         name = Path(file.filename or "skill.md").stem
-        skill_dir = SKILLS_DIR / name
+        try:
+            skill_dir = _safe_child(SKILLS_DIR, name)
+        except ValueError:
+            from fastapi.responses import JSONResponse
+            return JSONResponse({"error": "invalid name"}, status_code=400)
         skill_dir.mkdir(parents=True, exist_ok=True)
         (skill_dir / "SKILL.md").write_text(text, "utf-8")
         # parse description from frontmatter
@@ -640,7 +752,11 @@ def create_app(cfg: dict | None = None) -> FastAPI:
     @app.delete("/api/skills/{skill_name}")
     def delete_skill(skill_name: str):
         import shutil
-        target = SKILLS_DIR / skill_name
+        try:
+            target = _safe_child(SKILLS_DIR, skill_name)
+        except ValueError:
+            from fastapi.responses import JSONResponse
+            return JSONResponse({"error": "invalid name"}, status_code=400)
         if target.exists() and target.is_dir():
             shutil.rmtree(target)
         return {"ok": True}
@@ -649,8 +765,8 @@ def create_app(cfg: dict | None = None) -> FastAPI:
 
     @app.get("/api/mcp/status")
     def get_mcp_status():
-        if _builtin_mcp_managers:
-            return _builtin_mcp_managers[0].get_status()
+        if _shared_backend:
+            return _shared_backend["mcp"].get_status()
         return {}
 
     # ── MCP Server Detail ───────────────────────────────────────
@@ -658,9 +774,8 @@ def create_app(cfg: dict | None = None) -> FastAPI:
     @app.get("/api/mcp/servers/{name}")
     def get_mcp_server_detail(name: str):
         detail: dict = {"name": name}
-        if _builtin_mcp_managers:
-            mgr = _builtin_mcp_managers[0]
-            mcp_detail = mgr.get_server_detail(name)
+        if _shared_backend:
+            mcp_detail = _shared_backend["mcp"].get_server_detail(name)
             if mcp_detail:
                 detail.update(mcp_detail)
         # merge catalog metadata if available
@@ -712,11 +827,14 @@ def create_app(cfg: dict | None = None) -> FastAPI:
             count = asyncio.run(_test())
             return {"ok": True, "tools": count}
         except Exception as e:
-            return {"ok": False, "error": str(e)}
+            print(f"[cozmo] MCP test failed for '{name}': {e!r}")
+            return {"ok": False, "error": f"{type(e).__name__}: {str(e)[:200]}"}
 
     # ── Attachments ────────────────────────────────────────────
 
     ATTACHMENTS_DIR.mkdir(parents=True, exist_ok=True)
+
+    MAX_UPLOAD_SIZE = 100 * 1024 * 1024
 
     @app.post("/api/attachments")
     async def upload_attachment(file: UploadFile = File(...)):
@@ -725,6 +843,9 @@ def create_app(cfg: dict | None = None) -> FastAPI:
         filename = f"{att_id}{ext}"
         path = ATTACHMENTS_DIR / filename
         content = await file.read()
+        if len(content) > MAX_UPLOAD_SIZE:
+            from fastapi.responses import JSONResponse
+            return JSONResponse({"error": "file too large (max 100 MB)"}, status_code=413)
         path.write_bytes(content)
 
         mime = file.content_type or "application/octet-stream"
@@ -834,6 +955,157 @@ def create_app(cfg: dict | None = None) -> FastAPI:
                     session.answer_permission(msg.get("allowed", False))
                 elif mtype == "plan_response":
                     session.answer_plan(msg.get("approved", False))
+                elif mtype == "set_directory":
+                    from .code_indexer import ProjectIndex
+                    path_str = msg.get("path", "")
+                    if not path_str:
+                        await ws.send_text(json.dumps({"type": "error", "text": "No path provided"}))
+                        continue
+                    try:
+                        p = Path(path_str).resolve()
+                        if not p.is_dir():
+                            await ws.send_text(json.dumps({"type": "error", "text": f"Directory not found: {path_str}"}))
+                            continue
+                        idx = ProjectIndex(p)
+                        n = idx.index_all()
+                        session.runtime.project_index = idx
+                        session.runtime._project_context = f"Project directory: {p}"
+                        await ws.send_text(json.dumps({"type": "directory_set", "path": str(p), "indexed": n}))
+                    except Exception as e:
+                        await ws.send_text(json.dumps({"type": "error", "text": f"Failed to index directory: {e}"}))
+                elif mtype == "set_permission_mode":
+                    mode = msg.get("mode", "manual")
+                    session.runtime._perms.auto = (mode == "bypass")
+                    session.runtime._perm_mode = mode
+                elif mtype == "list_projects":
+                    idx = _projects_idx()
+                    search = (msg.get("search") or "").lower()
+                    raw = idx.get("projects", [])
+                    if search:
+                        raw = [p for p in raw if search in p["name"].lower() or search in p.get("description","").lower()]
+                    await ws.send_text(json.dumps({"type": "projects_list", "projects": raw}))
+                elif mtype == "get_recent_conversations":
+                    idx = _conversations_idx()
+                    mode_filter = msg.get("mode")
+                    convs = idx.get("conversations", [])
+                    if mode_filter:
+                        convs = [c for c in convs if c.get("mode") == mode_filter]
+                    convs.sort(key=lambda c: c.get("updatedAt", ""), reverse=True)
+                    limit = msg.get("limit", 15)
+                    await ws.send_text(json.dumps({"type": "recent_conversations", "conversations": convs[:limit]}))
+                elif mtype == "import_from_chat":
+                    conv_ids = msg.get("conversation_ids", [])
+                    conv_idx = _conversations_idx()
+                    conv_map = {c["id"]: c.get("title", "Untitled") for c in conv_idx.get("conversations", [])}
+                    parts = []
+                    titles = []
+                    for cid in conv_ids:
+                        md_path = _safe_child(CHATS_DIR, cid, ".md")
+                        if md_path and md_path.exists():
+                            text = md_path.read_text("utf-8")
+                            parts.append(text[:3000])
+                            if cid in conv_map:
+                                titles.append(conv_map[cid])
+                    combined = "\n\n---\n\n".join(parts) if parts else "(no content found)"
+                    # Create project directly
+                    from .code_indexer import ProjectIndex
+                    base = Path.home() / ".cozmo" / "imports"
+                    base.mkdir(parents=True, exist_ok=True)
+                    name = f"Import: {', '.join(titles[:2])}"[:60] if titles else "Imported Chat"
+                    project_dir = base / f"proj-{uuid.uuid4().hex[:8]}"
+                    project_dir.mkdir(parents=True, exist_ok=True)
+                    # Save instructions
+                    (project_dir / ".cozmo").mkdir(exist_ok=True)
+                    (project_dir / ".cozmo" / "instructions.md").write_text(combined, "utf-8")
+                    # Index
+                    idx_p = ProjectIndex(project_dir)
+                    n = idx_p.index_all()
+                    # Project record
+                    ts = datetime.now(timezone.utc).isoformat()
+                    project = {
+                        "id": f"proj-{uuid.uuid4().hex[:8]}",
+                        "name": name,
+                        "description": f"Imported from {len(conv_ids)} conversation(s)",
+                        "conversationIds": conv_ids,
+                        "sharedContext": combined,
+                        "createdAt": ts,
+                        "updatedAt": ts,
+                        "path": str(project_dir),
+                        "indexed": n,
+                    }
+                    pdx = _projects_idx()
+                    pdx["projects"].insert(0, project)
+                    _save_projects_idx(pdx)
+                    session.runtime.project_index = idx_p
+                    session.runtime._project_context = f"Project: {name} at {project_dir}"
+                    await ws.send_text(json.dumps({"type": "project_created", "project": project, "indexed": n}))
+                elif mtype == "create_project":
+                    name = (msg.get("name") or "").strip()
+                    if not name:
+                        await ws.send_text(json.dumps({"type": "error", "text": "Project name is required"}))
+                        continue
+                    location_str = (msg.get("location") or "").strip()
+                    if not location_str:
+                        await ws.send_text(json.dumps({"type": "error", "text": "Project location is required"}))
+                        continue
+                    try:
+                        from .code_indexer import ProjectIndex
+                        base = Path(location_str).resolve()
+                        project_dir = base / name
+                        project_dir.mkdir(parents=True, exist_ok=True)
+                        # Save instruction file
+                        instructions = msg.get("instructions", "")
+                        if instructions:
+                            (project_dir / ".cozmo").mkdir(exist_ok=True)
+                            (project_dir / ".cozmo" / "instructions.md").write_text(instructions, "utf-8")
+                        # Save uploaded files
+                        files = msg.get("files", [])
+                        for f in files:
+                            fpath = project_dir / f["name"]
+                            fpath.parent.mkdir(parents=True, exist_ok=True)
+                            fpath.write_text(f.get("content", ""), "utf-8")
+                        # Index the project
+                        idx = ProjectIndex(project_dir)
+                        n = idx.index_all()
+                        # Create project record
+                        ts = datetime.now(timezone.utc).isoformat()
+                        project = {
+                            "id": f"proj-{uuid.uuid4().hex[:8]}",
+                            "name": name,
+                            "description": (msg.get("description") or "").strip(),
+                            "conversationIds": [],
+                            "sharedContext": instructions,
+                            "createdAt": ts,
+                            "updatedAt": ts,
+                        }
+                        pidx = _projects_idx()
+                        pidx["projects"].insert(0, project)
+                        _save_projects_idx(pidx)
+                        # Set as current collab context
+                        session.runtime.project_index = idx
+                        session.runtime._project_context = f"Project: {name} at {project_dir}"
+                        project["path"] = str(project_dir)
+                        project["indexed"] = n
+                        await ws.send_text(json.dumps({
+                            "type": "project_created",
+                            "project": project,
+                            "indexed": n,
+                        }))
+                    except Exception as e:
+                        await ws.send_text(json.dumps({"type": "error", "text": f"Failed to create project: {e}"}))
+                elif mtype == "select_project":
+                    proj_id = msg.get("project_id", "")
+                    idx = _projects_idx()
+                    found = None
+                    for p in idx["projects"]:
+                        if p["id"] == proj_id:
+                            found = p
+                            break
+                    if found:
+                        session.runtime._project_context = found.get("sharedContext", "")
+                        await ws.send_text(json.dumps({"type": "project_selected", "project": found}))
+                    else:
+                        await ws.send_text(json.dumps({"type": "error", "text": "Project not found"}))
                 elif mtype == "reset":
                     if not session.busy:
                         session.runtime.reset()

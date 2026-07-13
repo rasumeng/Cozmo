@@ -16,8 +16,10 @@ Loop:
   → compact history when it grows past the window
 """
 
+import difflib
 import json
 import base64
+import logging
 import re
 import threading
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
@@ -32,6 +34,8 @@ from langchain_core.messages import (
 )
 from langchain_core.tools import StructuredTool
 
+log = logging.getLogger("cozmo.runtime")
+
 ATTACHMENTS_DIR = Path.home() / ".cozmo" / "attachments"
 SKILLS_DIR = Path.home() / ".cozmo" / "skills"
 
@@ -39,6 +43,10 @@ SKILLS_DIR = Path.home() / ".cozmo" / "skills"
 # ── Skill loading ─────────────────────────────────────────────────────────────
 
 _SKILL_RE = re.compile(r"@skill\s+([a-z0-9][a-z0-9-]*)", re.IGNORECASE)
+
+# Max chars of bundled skill files injected into the prompt at once.
+# SKILL.md itself is always included; extra files are trimmed to this budget.
+_MAX_SKILL_FILES_CHARS = 6000
 
 
 def _load_all_skills() -> dict[str, dict]:
@@ -71,11 +79,12 @@ def _load_all_skills() -> dict[str, dict]:
             if not f.is_file() or f.name == "SKILL.md":
                 continue
             if f.suffix == ".pyc" or "__pycache__" in str(f):
-                try:
-                    rel = str(f.relative_to(folder))
-                    files[rel] = f.read_text("utf-8")
-                except Exception:
-                    pass
+                continue
+            try:
+                rel = str(f.relative_to(folder))
+                files[rel] = f.read_text("utf-8")
+            except Exception:
+                pass
         skills[name] = {
             "name": name,
             "description": description,
@@ -135,15 +144,17 @@ _MODE_DISCIPLINE = {
     ),
     "research": (
         "MODE: RESEARCH — the user needs CURRENT information.\n"
-        "- Search results are provided below. Base your answer "
-        "ONLY on those results, never on training data — your training data "
-        "is stale for this question.\n"
-        "- The results below are your PRIMARY source. Answer from them directly. "
-        "Do NOT re-search unless the results are clearly empty or irrelevant.\n"
+        "- If search results are provided below, they are your PRIMARY source. "
+        "Answer from them directly, never from training data — your training "
+        "data is stale for this question. Do NOT re-search unless the results "
+        "are clearly irrelevant.\n"
+        "- If NO search results are provided below, call the web_search tool "
+        "FIRST with a focused query, then answer from what it returns.\n"
         "- If results conflict, prefer the most recent and say so.\n"
         "- Cite where facts came from (source names/domains from the results).\n"
         "- If you genuinely cannot find the answer in any results, say exactly "
-        "that — do not fabricate."
+        "that — do not fabricate and do not claim you lack internet access "
+        "(you have the web_search tool)."
     ),
     "collab": (
         "MODE: COLLAB — structured task execution with an approved plan.\n"
@@ -172,6 +183,8 @@ Examples:
 - "what's the best team for abyss" → research
 - "edit main.py and fix the bug" → work
 - "what is a monad" → chat
+- "help me brainstorm feature ideas" → collab
+- "what's the weather in tokyo" → research
 - "write a spec for the auth system" → collab
 - "plan the architecture for a new feature" → collab
 - "draft documentation for the API" → collab
@@ -185,11 +198,11 @@ Answer with one word:"""
 # Pre-pass keywords that short-circuit to research mode before LLM call.
 # Catches patterns the small router model might miss.
 _RESEARCH_KEYWORDS = [
-    "who should", "pull", "banner", "tier list", "meta",
+    "who should i pull", "who to pull", "banner", "tier list",
     "new character", "gacha", "game update", "latest news",
-    "current events", "what's new", "what is the best",
-    "weather", "price", "release", "upcoming", "schedule",
-    "today", "this week", "this month",
+    "current events", "what's new",
+    "weather", "price of", "release date", "upcoming", "schedule",
+    "this week", "this month",
 ]
 
 _COLLAB_PLAN_PROMPT = """You are planning a multi-step task. Review the context and generate a clear, numbered plan.
@@ -219,7 +232,10 @@ Context note:"""
 # text-fallback: models that don't emit native tool_calls sometimes emit JSON.
 _TEXT_TOOLCALL_RE = re.compile(r"\{.*\}", re.DOTALL)
 
-_SEARCH_TOOL_PREFERENCE = ("web_search_pipeline", "web_search")
+# Plain web_search first: grounding needs fast raw results. The full
+# pipeline (rewrite LLM + page fetches + synthesis LLM) is too slow to
+# run synchronously before every research answer.
+_SEARCH_TOOL_PREFERENCE = ("web_search", "web_search_pipeline")
 
 
 # ── Runtime ──────────────────────────────────────────────────────────────────
@@ -235,6 +251,7 @@ class CozmoRuntime:
         project_index=None,
         cfg: dict | None = None,
         router_llm: OllamaModel | None = None,
+        skills: dict | None = None,
     ):
         self.model_manager = model_manager
         self.router_llm = router_llm
@@ -275,8 +292,11 @@ class CozmoRuntime:
 
         self._perms = PermissionResolver(self.cfg)
         self._permission_callback = None  # UI hook: (tool, args) -> bool
+        self._perm_mode = "manual"
         self._lc_tools = self._build_lc_tools()
-        self._skills = _load_all_skills()
+        # skills is shared/read-only when passed in by the server; only fall
+        # back to a disk read when constructed standalone (e.g. CLI).
+        self._skills = skills if skills is not None else _load_all_skills()
         self._skill_names_list = ", ".join(
             f"{n} ({s['description'][:60]})" for n, s in self._skills.items()
         ) if self._skills else "(none installed)"
@@ -360,18 +380,7 @@ class CozmoRuntime:
 
         if activated_skills:
             for sk in activated_skills:
-                parts.append(
-                    f"ACTIVATED SKILL: {sk['name']}\n"
-                    f"{sk['content']}"
-                )
-                if sk.get("files"):
-                    files_text = "\n\n".join(
-                        f"--- {path} ---\n{text}"
-                        for path, text in sk["files"].items()
-                    )
-                    parts.append(
-                        f"SKILL FILES ({sk['name']}):\n{files_text}"
-                    )
+                parts.append(self._skill_block(sk))
 
         if attachments:
             file_list = "\n".join(
@@ -403,6 +412,45 @@ class CozmoRuntime:
 
         return "\n\n".join(parts)
 
+    # ── skills ────────────────────────────────────────────────────────────
+
+    def _skill_block(self, sk: dict) -> str:
+        """Render an activated skill for the prompt. Caps bundled file content
+        so a large skill can't blow a small model's context window (progressive
+        disclosure — SKILL.md always shown, files trimmed to a budget)."""
+        out = [f"ACTIVATED SKILL: {sk['name']}\n{sk['content']}"]
+        files = sk.get("files") or {}
+        if files:
+            rendered, skipped, used = [], [], 0
+            for path, text in files.items():
+                block = f"--- {path} ---\n{text}"
+                if used + len(block) > _MAX_SKILL_FILES_CHARS:
+                    skipped.append(path)
+                    continue
+                rendered.append(block)
+                used += len(block)
+            body = "\n\n".join(rendered)
+            if skipped:
+                skill_dir = sk.get("path", "the skill folder")
+                body += (f"\n\n({len(skipped)} more skill file(s) not shown to "
+                         f"save context: {', '.join(skipped)}. They live under "
+                         f"{skill_dir} — read one with read_file if you need it.)")
+            out.append(f"SKILL FILES ({sk['name']}):\n{body}")
+        return "\n\n".join(out)
+
+    def _scan_skills(self, text: str, already: list[dict]) -> list[dict]:
+        """Return installed skills newly referenced via @skill in `text`
+        (skipping any already activated). Used for both the user's message
+        and the model's own output, so the model can self-activate skills."""
+        found: list[dict] = []
+        if not self._skills or not text:
+            return found
+        for m in _SKILL_RE.finditer(text):
+            sk = self._skills.get(m.group(1).lower())
+            if sk and sk not in already and sk not in found:
+                found.append(sk)
+        return found
+
     # ── routing ──────────────────────────────────────────────────────────
 
     def _route(self, user_input: str) -> str:
@@ -419,7 +467,11 @@ class CozmoRuntime:
         for mode in ("collab", "work", "research", "chat"):
             if mode in raw:
                 return mode
-        return "research"
+        # Unparseable classifier output: chat is the cheap, safe default.
+        # Research mode forces a blocking search; chat mode can still
+        # tell the user what it needs.
+        log.warning("router returned unrecognized mode %r; defaulting to chat", raw)
+        return "chat"
 
     # ── forced grounding search (research mode) ──────────────────────────
 
@@ -437,11 +489,19 @@ class CozmoRuntime:
                 with ThreadPoolExecutor(max_workers=1) as pool:
                     fut = pool.submit(info.fn, query=user_input)
                     result = fut.result(timeout=15)
-                return self._sanitize(str(result))
+                text = self._sanitize(str(result))
+                # A no-results/unavailable message is not grounding — return
+                # empty so the loop keeps search tools available instead.
+                if text.startswith("Web search unavailable"):
+                    log.warning("grounding search returned no results (%s)", name)
+                    return ""
+                return text
             except FutureTimeout:
-                return "(search timed out — check network / SearXNG)"
+                log.warning("grounding search timed out (%s)", name)
+                return ""
             except Exception as e:
-                return f"(search failed: {e})"
+                log.warning("grounding search failed (%s): %s", name, e)
+                return ""
         return ""
 
     # ── collab mode: plan generation ──────────────────────────────────────
@@ -471,7 +531,9 @@ class CozmoRuntime:
             llm = self.model_manager.client("research", temperature=0.2)
             prompt = _COLLAB_PLAN_PROMPT.format(context=context, query=user_input)
             plan = llm.invoke(prompt)
-            return plan.strip()
+            # model_manager clients return an AIMessage, not a str
+            text = getattr(plan, "content", plan)
+            return text.strip() if isinstance(text, str) else str(text).strip()
         except Exception as e:
             return f"1. Investigate the request: {user_input}\n2. Execute based on available tools and context.\n(Plan generation failed: {e})"
 
@@ -504,6 +566,24 @@ class CozmoRuntime:
     # ── tool execution ───────────────────────────────────────────────────
 
     def _check_permission(self, name: str, args: dict) -> bool:
+        mode = getattr(self, '_perm_mode', 'manual')
+        # Plan: deny all tool execution (agent generates plan only)
+        if mode == 'plan':
+            return False
+        # Bypass: allow everything without asking
+        if mode == 'bypass':
+            return True
+        # Accept edits: auto-allow file changes, ask for other tools
+        if mode == 'accept-edits' and name in ('edit_file', 'write_file'):
+            return True
+        # Auto: auto-allow safe tools, ask for risky ones
+        if mode == 'auto':
+            safe = {'read_file', 'list_directory', 'grep_search', 'calculator',
+                    'git_diff', 'git_log', 'web_search', 'web_search_pipeline',
+                    'web_fetch', 'fetch_url'}
+            if name in safe:
+                return True
+        # Manual (default) + fallback: config rules then UI callback
         decision = self._perms.resolve(name, args, agent="cozmo")
         if decision == "allow":
             return True
@@ -513,6 +593,21 @@ class CozmoRuntime:
         if self._permission_callback:
             return self._permission_callback(name, args)
         return False
+
+    def _compute_diff(self, name: str, args: dict) -> dict | None:
+        if name == "edit_file":
+            old = (args.get("old_text") or "").splitlines(keepends=True)
+            new = (args.get("new_text") or "").splitlines(keepends=True)
+            diff = list(difflib.unified_diff(old, new,
+                         fromfile=args.get("path","?"), tofile=args.get("path","?"), n=3))
+            text = "".join(diff[2:]) if len(diff) > 2 else ""
+            added = sum(1 for l in diff if l.startswith("+") and not l.startswith("+++"))
+            removed = sum(1 for l in diff if l.startswith("-") and not l.startswith("---"))
+            return {"text": text, "added": added, "removed": removed}
+        if name == "write_file":
+            new = (args.get("content") or "").splitlines()
+            return {"text": "\n".join(f"+{l}" for l in new), "added": len(new), "removed": 0}
+        return None
 
     def _exec_tool(self, name: str, args: dict) -> str:
         info = self._registry.get(name)
@@ -563,14 +658,8 @@ class CozmoRuntime:
         try:
             has_images = attachments and any(a.get("type") == "image" for a in attachments)
 
-            # ── skill activation ──────────────────────────────────────────
-            activated_skills: list[dict] = []
-            if self._skills:
-                for match in _SKILL_RE.finditer(user_input):
-                    skill_name = match.group(1).lower()
-                    sk = self._skills.get(skill_name)
-                    if sk and sk not in activated_skills:
-                        activated_skills.append(sk)
+            # ── skill activation (from the user's message) ────────────────
+            activated_skills: list[dict] = self._scan_skills(user_input, [])
 
             yield ("status", "Routing...")
             mode = self._route(user_input) if not has_images else "vision"
@@ -649,6 +738,19 @@ class CozmoRuntime:
                     # wasn't a real tool call — surface it after all.
                     if suppress and not streamed:
                         yield ("token", content_buf)
+                    # the model may activate a skill by writing @skill <name>;
+                    # inject it and keep looping so it can actually use it.
+                    newly = self._scan_skills(content_buf, activated_skills)
+                    if newly:
+                        activated_skills.extend(newly)
+                        names = ", ".join(s["name"] for s in newly)
+                        yield ("thinking", f"Activating skill: {names}",
+                               f"Loading skill instructions: {names}", None)
+                        msgs.append(ai if isinstance(ai, AIMessage)
+                                    else AIMessage(content=content_buf))
+                        for sk in newly:
+                            msgs.append(SystemMessage(content=self._skill_block(sk)))
+                        continue
                     final = content_buf.strip()
                     break
 
@@ -656,16 +758,19 @@ class CozmoRuntime:
                 msgs.append(ai if isinstance(ai, AIMessage)
                             else AIMessage(content=content_buf))
                 names = ", ".join(c["name"] for c in calls)
+                arg_sigs = [json.dumps(c["args"], sort_keys=True, default=str) for c in calls]
                 calls_detail = "; ".join(
-                    f"{c['name']}({json.dumps(c['args'], default=str)[:200]})"
-                    for c in calls
+                    f"{c['name']}({sig[:200]})"
+                    for c, sig in zip(calls, arg_sigs)
                 )
                 yield ("thinking", f"Running: {names}", calls_detail, None)
 
-                for c in calls:
+                for c, args_sig in zip(calls, arg_sigs):
                     if self._check_stop():
                         return
-                    sig = f"{c['name']}:{json.dumps(c['args'], sort_keys=True, default=str)}"
+                    sig = f"{c['name']}:{args_sig}"
+                    call_id = f"call-{step}-{c['name']}"
+                    yield ("tool_call", c["name"], c["args"], call_id)
                     if sig in seen_calls:
                         out = (f"Error: you already made this exact {c['name']} call "
                                f"and have its result above. Use it, or try a "
@@ -673,6 +778,8 @@ class CozmoRuntime:
                     else:
                         seen_calls.add(sig)
                         out = self._exec_tool(c["name"], c["args"])
+                    diff = self._compute_diff(c["name"], c["args"])
+                    yield ("tool_result", c["name"], out, call_id, diff)
                     msgs.append(ToolMessage(content=out, tool_call_id=c["id"]))
                     if self._check_stop():
                         return
@@ -733,8 +840,8 @@ class CozmoRuntime:
             summary = self.router_llm.invoke(_COMPACT_PROMPT.format(text=text))
             if summary and not summary.lower().startswith("error"):
                 self._summary = summary.strip()
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning("history compaction failed: %s", e)
 
     def reset(self):
         """Clear conversation state (new chat)."""

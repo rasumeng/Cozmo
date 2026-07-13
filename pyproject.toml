@@ -28,7 +28,6 @@ dependencies = [
     "langchain-core",
     "chromadb",
     "tomli-w",
-    "ddgs",
     "pyperclip",
     "Pillow",
     "prompt-toolkit",
