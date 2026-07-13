@@ -138,3 +138,57 @@ def web_fetch(url: str, max_length: int = 5000) -> str:
         return text or "No readable content found."
     except Exception as e:
         return f"Error fetching URL: {e}"
+
+
+@register_tool()
+def webfetch(url: str, format: str = "markdown", max_length: int = 8000) -> str:
+    """Fetch content from a URL and return in specified format.
+
+    Args:
+        url: The URL to fetch.
+        format: Output format - 'markdown' (default), 'text', or 'html'.
+        max_length: Maximum characters to return (default 8000).
+    """
+    try:
+        import trafilatura
+        downloaded = trafilatura.fetch_url(url)
+        if downloaded and format == "markdown":
+            text = trafilatura.extract(
+                downloaded,
+                include_comments=False,
+                include_tables=True,
+                favor_precision=False,
+                favor_recall=True,
+                output_format="txt",
+            )
+            if text and len(text) > 100:
+                if len(text) > max_length:
+                    text = text[:max_length] + "\n[truncated]"
+                return text
+        elif downloaded and format == "html":
+            if len(downloaded) > max_length:
+                return downloaded[:max_length] + "\n[truncated]"
+            return downloaded
+
+        # Fallback: raw fetch
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+
+        if format == "html":
+            if len(raw) > max_length:
+                return raw[:max_length] + "\n[truncated]"
+            return raw
+
+        # text or markdown fallback: strip HTML
+        text = re.sub(r"<script[^>]*>.*?</script>", "", raw, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r"<style[^>]*>.*?</style>", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"<[^>]+>", " ", text)
+        text = re.sub(r"\s+", " ", text).strip()
+
+        if len(text) > max_length:
+            text = text[:max_length] + "\n[truncated]"
+
+        return text or "No readable content found."
+    except Exception as e:
+        return f"Error fetching URL: {e}"

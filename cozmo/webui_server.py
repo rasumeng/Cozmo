@@ -554,6 +554,44 @@ def create_app(cfg: dict | None = None) -> FastAPI:
                  "enabled": True}
                 for name, fn in sorted(TOOL_REGISTRY.items())]
 
+    # ── Memory ──────────────────────────────────────────────────
+
+    @app.get("/api/memory/list")
+    def list_memory():
+        b = get_backend(cfg)
+        mem = b.get("memory")
+        if not mem or not hasattr(mem, "chroma"):
+            return []
+        items = mem.chroma.list_all(limit=200)
+        return items
+
+    @app.get("/api/memory/search")
+    def search_memory(q: str = ""):
+        if not q.strip():
+            return []
+        b = get_backend(cfg)
+        mem = b.get("memory")
+        if not mem:
+            return []
+        try:
+            results = mem.query(q, k=10, distance_threshold=1.0)
+            return results
+        except Exception:
+            return []
+
+    @app.delete("/api/memory/{item_id}")
+    def delete_memory(item_id: str):
+        b = get_backend(cfg)
+        mem = b.get("memory")
+        if not mem or not hasattr(mem, "chroma"):
+            return {"ok": False}
+        ok = mem.chroma.delete(item_id)
+        return {"ok": ok}
+
+    @app.get("/api/memory/path")
+    def memory_path():
+        return {"path": str(Path.home() / ".cozmo" / "memory")}
+
     @app.post("/api/transcribe")
     async def transcribe_audio(file: UploadFile = File(...)):
         import tempfile, os
@@ -909,6 +947,51 @@ def create_app(cfg: dict | None = None) -> FastAPI:
                 return {"ok": True}
         return {"ok": True}
 
+    # ── task queue ────────────────────────────────────────────────────────
+    from .task_queue import TaskQueue, TaskStatus
+    task_queue = TaskQueue()
+
+    @app.get("/api/tasks")
+    def list_tasks(status: str = ""):
+        s = TaskStatus(status) if status else None
+        return [t.to_dict() for t in task_queue.list_tasks(s)]
+
+    @app.post("/api/tasks")
+    def create_task(body: dict):
+        desc = body.get("description", "")
+        prompt = body.get("prompt", "")
+        agent = body.get("agent_type", "general")
+        if not prompt:
+            return {"error": "prompt required"}
+        task = task_queue.add(desc, prompt, agent)
+        return task.to_dict()
+
+    @app.post("/api/tasks/{task_id}/run")
+    def run_task(task_id: str):
+        task = task_queue.get(task_id)
+        if not task:
+            return {"error": "not found"}
+        from .core.model_manager import ModelManager
+        from .core.runtime import CozmoRuntime
+        def factory():
+            mm = ModelManager(cfg.get("models", {}))
+            return CozmoRuntime(model_manager=mm, cfg=cfg)
+        task_queue.run_task(task, factory)
+        return task.to_dict()
+
+    @app.post("/api/tasks/{task_id}/cancel")
+    def cancel_task(task_id: str):
+        ok = task_queue.cancel(task_id)
+        return {"ok": ok}
+
+    @app.delete("/api/tasks/{task_id}")
+    def delete_task(task_id: str):
+        task = task_queue.get(task_id)
+        if task:
+            task.status = TaskStatus.CANCELLED
+            task_queue._save(task)
+        return {"ok": True}
+
     @app.websocket("/ws/chat")
     async def ws_chat(ws: WebSocket):
         await ws.accept()
@@ -957,6 +1040,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
                     session.answer_plan(msg.get("approved", False))
                 elif mtype == "set_directory":
                     from .code_indexer import ProjectIndex
+                    from .tools.file_ops import set_allowed_root
                     path_str = msg.get("path", "")
                     if not path_str:
                         await ws.send_text(json.dumps({"type": "error", "text": "No path provided"}))
@@ -966,6 +1050,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
                         if not p.is_dir():
                             await ws.send_text(json.dumps({"type": "error", "text": f"Directory not found: {path_str}"}))
                             continue
+                        set_allowed_root(p)
                         idx = ProjectIndex(p)
                         n = idx.index_all()
                         session.runtime.project_index = idx

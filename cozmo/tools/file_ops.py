@@ -10,6 +10,12 @@ ALLOWED_ROOT = Path.cwd()
 KNOWLEDGE = Path("./knowledge").resolve()
 
 
+def set_allowed_root(root: str | Path):
+    """Update the allowed root directory for file operations at runtime."""
+    global ALLOWED_ROOT
+    ALLOWED_ROOT = Path(root).resolve()
+
+
 def _safe_path(path: str) -> Path | None:
     resolved = (ALLOWED_ROOT / path).resolve()
     if ALLOWED_ROOT in resolved.parents or resolved == ALLOWED_ROOT:
@@ -51,6 +57,74 @@ def list_directory(path: str = ".") -> str:
         return "\n".join(sorted(entries))
     except Exception as e:
         return f"Error listing directory: {e}"
+
+
+@register_tool()
+def glob_search(pattern: str, path: str = ".") -> str:
+    """Find files matching a glob pattern (e.g. '**/*.py', 'src/**/*.ts').
+
+    Args:
+        pattern: Glob pattern to match (supports **, *, ?).
+        path: Directory to search in (default: current directory).
+    """
+    import fnmatch
+    safe = _safe_path(path)
+    if safe is None:
+        return "Error: path outside allowed directory"
+    if not safe.exists():
+        return "Error: path not found"
+    matches = []
+    for f in safe.rglob("*"):
+        if not f.is_file():
+            continue
+        if ".git" in f.parts or "__pycache__" in f.parts or "node_modules" in f.parts:
+            continue
+        rel = str(f.relative_to(safe))
+        if fnmatch.fnmatch(rel, pattern) or fnmatch.fnmatch(f.name, pattern):
+            matches.append(rel)
+    if not matches:
+        return "No matches found."
+    matches.sort()
+    if len(matches) > 200:
+        return "\n".join(matches[:200]) + f"\n... [{len(matches) - 200} more]"
+    return "\n".join(matches)
+
+
+@register_tool()
+def read(path: str, offset: int = 0, limit: int = 0) -> str:
+    """Read file contents with optional line range.
+
+    Args:
+        path: File path (relative to project root).
+        offset: Line number to start from (1-indexed). 0 = from beginning.
+        limit: Max number of lines to return. 0 = no limit.
+    """
+    safe = _safe_path(path)
+    if safe is None:
+        return "Error: path outside allowed directory"
+    if not safe.exists():
+        return "Error: file not found"
+    if not safe.is_file():
+        return "Error: not a file"
+    try:
+        lines = safe.read_text(encoding="utf-8").splitlines(keepends=True)
+        total = len(lines)
+        if offset > 0:
+            start = max(0, offset - 1)
+        else:
+            start = 0
+        if limit > 0:
+            end = min(total, start + limit)
+        else:
+            end = total
+        selected = lines[start:end]
+        numbered = [f"{i + 1}: {line.rstrip()}" for i, line in enumerate(selected, start=start)]
+        result = "\n".join(numbered)
+        if end < total:
+            result += f"\n... [{total - end} more lines]"
+        return result
+    except Exception as e:
+        return f"Error reading file: {e}"
 
 
 @register_tool()

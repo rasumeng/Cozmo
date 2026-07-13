@@ -104,9 +104,9 @@ from ..tools import TOOL_REGISTRY
 # ── Prompts ──────────────────────────────────────────────────────────────────
 
 _IDENTITY = (
-    "You are Cozmo, a capable local AI coding agent (like Claude Code) running "
-    "entirely on-device via Ollama. You help with coding, file editing, "
-    "debugging, running commands, research, and general questions.\n"
+    "You are Cozmo, a capable local AI assistant running entirely on-device via Ollama. "
+    "You help with coding, file editing, debugging, running commands, research, writing, "
+    "analysis, and general questions.\n"
     "Today's date is {date}. Your training data is older than this — for "
     "anything time-sensitive, trust tool results over your own knowledge.\n\n"
     "AGENT BEHAVIOR:\n"
@@ -170,7 +170,7 @@ _ROUTE_PROMPT = """Classify the user's latest request as exactly one word:
 - chat: greetings, small talk, definitions, general Q&A answerable from timeless knowledge
 - work: coding, editing files, debugging, shell commands, anything touching the project
 - collab: structured multi-step tasks like writing specs, planning architecture, documenting, brainstorming, researching, creating reports or proposals
-- research: needs current/external info (news, events, wars, sports, prices, weather, releases, schedules, "today", "latest", "recent", "next", "upcoming", game banners, character tiers, gacha pulls, who to pull, what to build)
+- research: needs current/external info (news, events, sports, prices, weather, releases, schedules, "today", "latest", "recent", "next", "upcoming")
 - vision: image generation, image editing, processing .png/.jpeg/.bmp/.gif/.tiff/.webp
 
 Anything about current events or things that change over time is research, even if phrased vaguely.
@@ -178,16 +178,20 @@ When unsure between chat and research, pick research. When it touches code or fi
 Multi-step tasks that need planning (writing docs, creating specs, architecture design, research reports) → collab.
 
 Examples:
-- "who should I pull in wuthering waves" → research
-- "latest genshin banners" → research
-- "what's the best team for abyss" → research
+- "what's the weather in new york" → research
+- "latest stock price of apple" → research
+- "who won the super bowl" → research
 - "edit main.py and fix the bug" → work
 - "what is a monad" → chat
 - "help me brainstorm feature ideas" → collab
-- "what's the weather in tokyo" → research
 - "write a spec for the auth system" → collab
 - "plan the architecture for a new feature" → collab
 - "draft documentation for the API" → collab
+- "summarize this article about AI" → research
+- "create a presentation outline" → collab
+- "fix the typo in README.md" → work
+- "explain how DNS works" → chat
+- "research competitors in the AI space" → collab
 
 Recent conversation (for context on vague follow-ups):
 {history}
@@ -198,11 +202,10 @@ Answer with one word:"""
 # Pre-pass keywords that short-circuit to research mode before LLM call.
 # Catches patterns the small router model might miss.
 _RESEARCH_KEYWORDS = [
-    "who should i pull", "who to pull", "banner", "tier list",
-    "new character", "gacha", "game update", "latest news",
-    "current events", "what's new",
+    "latest news", "current events", "what's new",
     "weather", "price of", "release date", "upcoming", "schedule",
-    "this week", "this month",
+    "this week", "this month", "today", "right now",
+    "who won", "score", "election", "breaking",
 ]
 
 _COLLAB_PLAN_PROMPT = """You are planning a multi-step task. Review the context and generate a clear, numbered plan.
@@ -367,6 +370,10 @@ class CozmoRuntime:
                        activated_skills: list[dict] | None = None) -> str:
         parts = [_IDENTITY.format(date=datetime.now().strftime("%A, %B %d, %Y"))]
         parts.append(_MODE_DISCIPLINE.get(mode, _MODE_DISCIPLINE["chat"]))
+
+        personality = (self.cfg.get("personality") or "").strip()
+        if personality:
+            parts.append(f"USER PREFERENCES:\n{personality}")
 
         if self._skills:
             skill_lines = "\n".join(
@@ -709,11 +716,16 @@ class CozmoRuntime:
 
             final = ""
             seen_calls: set[str] = set()  # break identical-call loops
+            failed_steps: list[str] = []  # track failures for error recovery
             for step in range(self.max_steps):
                 acc = None
                 content_buf = ""
                 suppress = False
                 streamed = False
+
+                if mode == "collab":
+                    yield ("thinking", f"Step {step + 1}/{self.max_steps}",
+                           f"Executing step {step + 1}", None)
 
                 for chunk in runnable.stream(msgs):
                     if self._check_stop():
@@ -778,6 +790,9 @@ class CozmoRuntime:
                     else:
                         seen_calls.add(sig)
                         out = self._exec_tool(c["name"], c["args"])
+                    # Track failures for collab error recovery
+                    if mode == "collab" and out.startswith("Error"):
+                        failed_steps.append(f"Step {step + 1}: {c['name']} failed — {out[:200]}")
                     diff = self._compute_diff(c["name"], c["args"])
                     yield ("tool_result", c["name"], out, call_id, diff)
                     msgs.append(ToolMessage(content=out, tool_call_id=c["id"]))
@@ -796,6 +811,12 @@ class CozmoRuntime:
                 final = ("I ran out of steps before finishing. Here's where I "
                          "got to — ask me to continue if you want me to keep going.")
                 yield ("token", final)
+
+            # Collab error recovery: append failure summary
+            if mode == "collab" and failed_steps:
+                fail_summary = "\n\n**Issues encountered:**\n" + "\n".join(f"- {f}" for f in failed_steps)
+                final = (final or "") + fail_summary
+                yield ("token", fail_summary)
 
             if not final:
                 final = "(no response — the model returned empty output; try rephrasing)"

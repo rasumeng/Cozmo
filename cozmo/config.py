@@ -26,6 +26,7 @@ DEFAULT_CONFIG = {
         "knowledge": "./knowledge",
         "git_repo": "",
     },
+    "personality": "",
     "search": {
         "url": "http://localhost:8080",
         "backend": "searxng",
