@@ -1,6 +1,6 @@
-import { MessageSquare, Users2, TerminalSquare, LucideIcon } from 'lucide-react'
+import { MessageSquare, Bot, TerminalSquare, LucideIcon } from 'lucide-react'
 
-export type WorkspaceMode = 'chat' | 'collab' | 'code'
+export type WorkspaceMode = 'chat' | 'agent' | 'code'
 
 interface ModeConfig {
   createLabel: string
@@ -16,9 +16,9 @@ export const WORKSPACE_MODE_CONFIG: Record<WorkspaceMode, ModeConfig> = {
     searchLabel: 'Search chats',
     emptyRecentLabel: 'Recent',
   },
-  collab: {
+  agent: {
     createLabel: 'New Task',
-    icon: Users2,
+    icon: Bot,
     searchLabel: 'Search tasks',
     emptyRecentLabel: 'Recent Tasks',
   },

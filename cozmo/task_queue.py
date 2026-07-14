@@ -25,7 +25,8 @@ class TaskStatus(str, Enum):
 class Task:
     def __init__(self, id: str, description: str, prompt: str,
                  agent_type: str = "general", status: TaskStatus = TaskStatus.PENDING,
-                 created: str = "", result: str = "", error: str = ""):
+                 created: str = "", result: str = "", error: str = "",
+                 goal: str = "", mode: str = "chat"):
         self.id = id
         self.description = description
         self.prompt = prompt
@@ -34,6 +35,8 @@ class Task:
         self.created = created or datetime.now().isoformat()
         self.result = result
         self.error = error
+        self.goal = goal
+        self.mode = mode
 
     def to_dict(self) -> dict:
         return {
@@ -45,6 +48,8 @@ class Task:
             "created": self.created,
             "result": self.result,
             "error": self.error,
+            "goal": self.goal,
+            "mode": self.mode,
         }
 
     @classmethod
@@ -58,6 +63,8 @@ class Task:
             created=d.get("created", ""),
             result=d.get("result", ""),
             error=d.get("error", ""),
+            goal=d.get("goal", ""),
+            mode=d.get("mode", "chat"),
         )
 
 
@@ -66,7 +73,12 @@ class TaskQueue:
         TASKS_DIR.mkdir(parents=True, exist_ok=True)
         self._tasks: dict[str, Task] = {}
         self._running: dict[str, threading.Thread] = {}
+        self._lock = threading.Lock()
+        self._on_update = None  # callback fn(task_id, status)
         self._load()
+
+    def set_update_callback(self, cb):
+        self._on_update = cb
 
     def _load(self):
         """Load pending/running tasks from disk."""
@@ -84,8 +96,14 @@ class TaskQueue:
         """Persist task to disk."""
         path = TASKS_DIR / f"{task.id}.json"
         path.write_text(json.dumps(task.to_dict(), indent=2), encoding="utf-8")
+        if self._on_update:
+            try:
+                self._on_update(task.id, task.status)
+            except Exception:
+                pass
 
-    def add(self, description: str, prompt: str, agent_type: str = "general") -> Task:
+    def add(self, description: str, prompt: str, agent_type: str = "general",
+            goal: str = "", mode: str = "chat") -> Task:
         """Add a new task to the queue."""
         import uuid
         task = Task(
@@ -93,31 +111,34 @@ class TaskQueue:
             description=description,
             prompt=prompt,
             agent_type=agent_type,
+            goal=goal,
+            mode=mode,
         )
-        self._tasks[task.id] = task
-        self._save(task)
+        with self._lock:
+            self._tasks[task.id] = task
+            self._save(task)
         return task
 
     def get(self, task_id: str) -> Task | None:
-        return self._tasks.get(task_id)
+        with self._lock:
+            return self._tasks.get(task_id)
 
     def list_tasks(self, status: TaskStatus | None = None) -> list[Task]:
-        tasks = list(self._tasks.values())
+        with self._lock:
+            tasks = list(self._tasks.values())
         if status:
             tasks = [t for t in tasks if t.status == status]
         tasks.sort(key=lambda t: t.created, reverse=True)
         return tasks
 
     def cancel(self, task_id: str) -> bool:
-        task = self._tasks.get(task_id)
-        if not task:
-            return False
-        if task.status == TaskStatus.RUNNING:
-            # Can't kill thread, but mark as cancelled
-            task.status = TaskStatus.CANCELLED
-        elif task.status == TaskStatus.PENDING:
-            task.status = TaskStatus.CANCELLED
-        self._save(task)
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if not task:
+                return False
+            if task.status in (TaskStatus.RUNNING, TaskStatus.PENDING):
+                task.status = TaskStatus.CANCELLED
+            self._save(task)
         return True
 
     def run_task(self, task: Task, runtime_factory):
@@ -125,32 +146,37 @@ class TaskQueue:
 
         runtime_factory: callable() -> CozmoRuntime
         """
-        if task.status == TaskStatus.RUNNING:
-            return
-
-        task.status = TaskStatus.RUNNING
-        self._save(task)
+        with self._lock:
+            if task.status == TaskStatus.RUNNING:
+                return
+            task.status = TaskStatus.RUNNING
+            self._save(task)
 
         def _worker():
             try:
                 runtime = runtime_factory()
                 result = runtime.run(task.prompt)
-                task.result = result
-                task.status = TaskStatus.COMPLETED
+                with self._lock:
+                    task.result = result
+                    task.status = TaskStatus.COMPLETED
+                    self._save(task)
             except Exception as e:
-                task.error = str(e)
-                task.status = TaskStatus.FAILED
-            self._save(task)
+                with self._lock:
+                    task.error = str(e)
+                    task.status = TaskStatus.FAILED
+                    self._save(task)
 
         t = threading.Thread(target=_worker, daemon=True)
-        self._running[task.id] = t
+        with self._lock:
+            self._running[task.id] = t
         t.start()
 
     def cleanup(self, max_completed: int = 50):
         """Remove old completed tasks from disk."""
-        completed = self.list_tasks(TaskStatus.COMPLETED)
-        for task in completed[max_completed:]:
-            path = TASKS_DIR / f"{task.id}.json"
-            if path.exists():
-                path.unlink()
-            del self._tasks[task.id]
+        with self._lock:
+            completed = self.list_tasks(TaskStatus.COMPLETED)
+            for task in completed[max_completed:]:
+                path = TASKS_DIR / f"{task.id}.json"
+                if path.exists():
+                    path.unlink()
+                del self._tasks[task.id]

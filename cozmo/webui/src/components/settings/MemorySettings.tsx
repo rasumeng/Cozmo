@@ -1,0 +1,192 @@
+import { useState, useEffect } from 'react'
+import { Trash2 } from 'lucide-react'
+import { API_BASE } from './api'
+import type { SettingsData } from './types'
+
+interface Props {
+  config: SettingsData | null
+}
+
+export function MemorySettings({ config }: Props) {
+  const [searchQuery, setSearchQuery] = useState('')
+  const [searchResults, setSearchResults] = useState<any[]>([])
+  const [allMemory, setAllMemory] = useState<any[]>([])
+  const [loading, setLoading] = useState(false)
+  const [tab, setTab] = useState<'browser' | 'config'>('browser')
+
+  const fetchAll = async () => {
+    try {
+      const r = await fetch(`${API_BASE}/api/memory/list`)
+      const data = await r.json()
+      setAllMemory(data)
+    } catch {}
+  }
+
+  const handleSearch = async () => {
+    if (!searchQuery.trim()) {
+      setSearchResults([])
+      return
+    }
+    setLoading(true)
+    try {
+      const r = await fetch(`${API_BASE}/api/memory/search?q=${encodeURIComponent(searchQuery)}`)
+      const data = await r.json()
+      setSearchResults(data)
+    } catch {}
+    setLoading(false)
+  }
+
+  const handleDelete = async (id: string) => {
+    try {
+      await fetch(`${API_BASE}/api/memory/${id}`, { method: 'DELETE' })
+      setAllMemory(prev => prev.filter(m => m.id !== id))
+      setSearchResults(prev => prev.filter(m => m.id !== id))
+    } catch {}
+  }
+
+  const openFolder = async () => {
+    try {
+      const r = await fetch(`${API_BASE}/api/memory/path`)
+      const data = await r.json()
+      if (data.path) {
+        navigator.clipboard.writeText(data.path)
+      }
+    } catch {}
+  }
+
+  useEffect(() => {
+    fetchAll()
+  }, [])
+
+  return (
+    <div className="space-y-4">
+      <p className="text-xs text-base-500">Long-term memory stores conversation summaries and learned facts using vector embeddings.</p>
+
+      <div className="flex gap-1 p-0.5 bg-base-800 rounded-lg">
+        <button
+          onClick={() => setTab('browser')}
+          className={`flex-1 px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
+            tab === 'browser' ? 'bg-base-700 text-base-100' : 'text-base-400 hover:text-base-200'
+          }`}
+        >
+          Memory Browser
+        </button>
+        <button
+          onClick={() => setTab('config')}
+          className={`flex-1 px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
+            tab === 'config' ? 'bg-base-700 text-base-100' : 'text-base-400 hover:text-base-200'
+          }`}
+        >
+          Config
+        </button>
+      </div>
+
+      {tab === 'browser' && (
+        <div className="space-y-3">
+          <div className="flex gap-2">
+            <input
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
+              placeholder="Search memories..."
+              className="flex-1 bg-base-800 border border-base-700 rounded-lg px-3 py-2 text-xs text-base-200 placeholder:text-base-500 outline-none focus:border-accent/40"
+            />
+            <button
+              onClick={handleSearch}
+              disabled={loading}
+              className="px-3 py-2 text-xs font-medium rounded-lg bg-base-700 text-base-200 hover:bg-base-600 transition-colors disabled:opacity-50"
+            >
+              {loading ? '...' : 'Search'}
+            </button>
+          </div>
+
+          <div className="flex items-center justify-between p-2 rounded-lg bg-base-800/50 border border-base-700">
+            <span className="text-[11px] text-base-400 font-mono">~/.cozmo/memory/</span>
+            <button onClick={openFolder} className="text-[11px] text-accent hover:text-accent/80 transition-colors">
+              Copy path
+            </button>
+          </div>
+
+          {searchResults.length > 0 && (
+            <div className="space-y-1.5">
+              <p className="text-[11px] text-base-400 font-medium">Search results ({searchResults.length})</p>
+              {searchResults.map((item, i) => (
+                <MemoryCard key={item.id || i} item={item} onDelete={handleDelete} />
+              ))}
+            </div>
+          )}
+
+          <div className="space-y-1.5">
+            <p className="text-[11px] text-base-400 font-medium">All memories ({allMemory.length})</p>
+            {allMemory.length === 0 && (
+              <p className="text-xs text-base-500 py-4 text-center">No memories stored yet. Memories are created automatically from conversations.</p>
+            )}
+            {allMemory.slice(0, 50).map((item) => (
+              <MemoryCard key={item.id} item={item} onDelete={handleDelete} />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {tab === 'config' && (
+        <div className="space-y-3">
+          <div className="flex items-center justify-between p-3 rounded-xl bg-base-800/50 border border-base-700">
+            <div>
+              <p className="text-sm text-base-100">Max turns before summary</p>
+              <p className="text-xs text-base-500">Conversation turns before memory is summarized</p>
+            </div>
+            <span className="text-sm font-mono text-base-200">{config?.memory?.max_turns_before_summary ?? 5}</span>
+          </div>
+          <div className="flex items-center justify-between p-3 rounded-xl bg-base-800/50 border border-base-700">
+            <div>
+              <p className="text-sm text-base-100">Max short-term pairs</p>
+              <p className="text-xs text-base-500">Recent conversation pairs kept in context</p>
+            </div>
+            <span className="text-sm font-mono text-base-200">{config?.memory?.max_short_term_pairs ?? 10}</span>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function MemoryCard({ item, onDelete }: { item: any; onDelete: (id: string) => void }) {
+  const [expanded, setExpanded] = useState(false)
+  const text = item.text || ''
+  const preview = text.length > 120 ? text.slice(0, 120) + '...' : text
+  const meta = item.metadata || {}
+  const distance = item.distance
+
+  return (
+    <div className="p-2.5 rounded-lg bg-base-800/30 border border-base-700/50 group">
+      <div className="flex items-start justify-between gap-2">
+        <div
+          className="flex-1 min-w-0 cursor-pointer"
+          onClick={() => setExpanded(!expanded)}
+        >
+          <p className="text-xs text-base-200 leading-relaxed whitespace-pre-wrap">
+            {expanded ? text : preview}
+          </p>
+          <div className="flex items-center gap-2 mt-1.5">
+            {meta.timestamp && (
+              <span className="text-[10px] text-base-500">{new Date(meta.timestamp).toLocaleDateString()}</span>
+            )}
+            {distance != null && (
+              <span className="text-[10px] text-base-600">score: {(1 - distance).toFixed(2)}</span>
+            )}
+            {meta.turns && (
+              <span className="text-[10px] text-base-600">{meta.turns} turns</span>
+            )}
+          </div>
+        </div>
+        <button
+          onClick={() => onDelete(item.id)}
+          className="p-1 rounded text-base-600 hover:text-err opacity-0 group-hover:opacity-100 transition-all"
+          title="Delete memory"
+        >
+          <Trash2 size={12} />
+        </button>
+      </div>
+    </div>
+  )
+}

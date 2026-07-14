@@ -13,13 +13,13 @@ WebSocket protocol (/ws/chat), JSON messages:
     {"type": "get_recent_conversations", "mode?": "...", "limit?": N}  recent convos for import
     {"type": "import_from_chat", "conversation_ids": [...]}   extract context from past convos
     {"type": "create_project", "name", "instructions", "files[]", "location"}  create project
-    {"type": "select_project", "project_id": "..."}           set current collab project
+    {"type": "select_project", "project_id": "..."}           set current agent task project
     {"type": "reset"}                                        new chat (clears runtime history)
   server → client:
     {"type": "token",    "text": "..."}                      streamed answer token
     {"type": "thinking", "text": "..."}                      agent step (mode, tool runs)
     {"type": "status",   "text": "..."}                      transient status line
-    {"type": "plan",     "plan": "..."}                      collab plan awaiting approval
+    {"type": "plan",     "plan": "..."}                      agent plan awaiting approval
     {"type": "tool_call",  "tool": "...", "args": {...}, "id": "..."}
     {"type": "tool_result", "tool": "...", "result": "...", "id": "...", "diff": {...}?}
     {"type": "directory_set", "path": "...", "indexed": N}
@@ -42,6 +42,7 @@ import re
 import uuid
 import threading
 import mimetypes
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -63,6 +64,173 @@ DEFAULT_SKILLS_DIR = Path(__file__).parent / "default_skills"
 # Each session gets a cheap per-session CozmoRuntime that references it.
 _shared_backend: dict | None = None
 _backend_lock = threading.Lock()
+
+# Background agent runs (run_id -> run info + thread).
+_background_runs: dict[str, dict] = {}
+_background_runs_lock = threading.Lock()
+
+# Each connection stores a thread-safe send wrapper for broadcasts.
+# Key = loop-generated id, Value = callable(text: str) -> None
+_connection_senders: dict[int, Callable[[str], None]] = {}
+_connection_senders_lock = threading.Lock()
+_next_conn_id = 0
+
+
+def _register_sender(loop, ws) -> int:
+    """Register a WebSocket for background-run broadcasts. Returns conn_id."""
+    global _next_conn_id
+    async def _send(text: str):
+        try:
+            await ws.send_text(text)
+        except Exception:
+            pass
+    def send(text: str):
+        asyncio.run_coroutine_threadsafe(_send(text), loop)
+    with _connection_senders_lock:
+        cid = _next_conn_id
+        _next_conn_id += 1
+        _connection_senders[cid] = send
+    return cid
+
+
+def _unregister_sender(cid: int):
+    with _connection_senders_lock:
+        _connection_senders.pop(cid, None)
+
+
+def _broadcast_sync(payload: dict):
+    """Synchronous broadcast — queues the send on each connection's event loop."""
+    cleaned = {k: v for k, v in payload.items() if v is not None}
+    text = json.dumps(cleaned)
+    with _connection_senders_lock:
+        dead_ids: list[int] = []
+        for cid, send_fn in _connection_senders.items():
+            try:
+                send_fn(text)
+            except Exception:
+                dead_ids.append(cid)
+        for cid in dead_ids:
+            _connection_senders.pop(cid, None)
+
+
+# ── Background run helpers ────────────────────────────────────────────────
+
+def _start_background_run(goal: str, cfg: dict) -> str:
+    """Start an agent run in a background thread. Returns run_id."""
+    import uuid
+    run_id = f"bg-{uuid.uuid4().hex[:8]}"
+    stop_flag = threading.Event()
+
+    def _emit(event_type: str, **kw):
+        kw["type"] = event_type
+        kw["run_id"] = run_id
+        _broadcast_sync(kw)
+
+    def _worker():
+        try:
+            rt = build_runtime(cfg)
+            rt.stop_event = stop_flag
+            _emit("background_run_update", status="running", goal=goal)
+            for item in rt.run_stream(goal, force_mode="agent"):
+                if stop_flag.is_set():
+                    _emit("background_run_update", status="cancelled", goal=goal)
+                    return
+                kind = item[0]
+                if kind == "tool_call":
+                    _, name, args, call_id = item
+                    _emit("background_run_log", log_type="tool_call",
+                          tool=name, args=args, call_id=call_id)
+                elif kind == "tool_result":
+                    _, name, result, call_id = item[:4]
+                    _emit("background_run_log", log_type="tool_result",
+                          tool=name, result=result, call_id=call_id)
+                elif kind == "agent_status":
+                    status, goal_text = item[1], item[2]
+                    step_text = item[3] if len(item) > 3 else None
+                    _emit("background_run_update", status=status, goal=goal_text, step=step_text)
+                elif kind == "token":
+                    pass
+                elif kind == "thinking":
+                    _emit("background_run_update", status="running", goal=goal, step=item[1])
+                elif kind == "plan":
+                    continue  # auto-approve plan for background runs
+            _emit("background_run_update", status="done", goal=goal)
+        except Exception as e:
+            import traceback
+            _emit("background_run_update", status="error", goal=goal, error=str(e))
+            traceback.print_exc()
+        finally:
+            with _background_runs_lock:
+                info = _background_runs.get(run_id)
+                if info:
+                    info["status"] = "done"
+                    info["ended"] = datetime.now(timezone.utc).isoformat()
+
+    info = {
+        "run_id": run_id,
+        "goal": goal,
+        "status": "queued",
+        "created": datetime.now(timezone.utc).isoformat(),
+        "ended": "",
+        "logs": [],
+    }
+    with _background_runs_lock:
+        _background_runs[run_id] = info
+
+    t = threading.Thread(target=_worker, daemon=True)
+    with _background_runs_lock:
+        _background_runs[run_id]["thread"] = t
+    t.start()
+    return run_id
+
+
+def _stop_background_run(run_id: str):
+    with _background_runs_lock:
+        info = _background_runs.get(run_id)
+        if not info:
+            return
+        info["status"] = "cancelled"
+
+
+def _list_background_runs() -> list[dict]:
+    with _background_runs_lock:
+        runs = []
+        for info in _background_runs.values():
+            runs.append({
+                "run_id": info["run_id"],
+                "goal": info["goal"],
+                "status": info["status"],
+                "created": info["created"],
+                "ended": info.get("ended", ""),
+            })
+        runs.sort(key=lambda r: r["created"], reverse=True)
+        return runs
+
+
+def _get_background_run_logs(run_id: str) -> list[dict]:
+    with _background_runs_lock:
+        info = _background_runs.get(run_id)
+        if not info:
+            return []
+        return info.get("logs", [])
+
+
+# ── Scheduler ────────────────────────────────────────────────────────────
+from .scheduler import Scheduler
+
+_scheduler_lock = threading.Lock()
+_scheduler_inst = None
+
+
+def _ensure_scheduler(cfg: dict):
+    global _scheduler_inst
+    with _scheduler_lock:
+        if _scheduler_inst is not None:
+            return _scheduler_inst
+        _scheduler_inst = Scheduler()
+        _scheduler_inst.on_trigger = lambda s: _start_background_run(s.goal, cfg)
+        _scheduler_inst.start()
+        return _scheduler_inst
 
 
 def get_backend(cfg: dict) -> dict:
@@ -180,8 +348,22 @@ class ChatSession:
         self._plan_approved = False
         self._worker: threading.Thread | None = None
         self.current_conv_id = ""
+        self.agent_config: dict = {}
         self.runtime.set_permission_callback(self._ask_permission)
         self.runtime.set_plan_callback(self._ask_plan)
+
+    def apply_agent_config(self):
+        if not self.agent_config:
+            return
+        ac = self.agent_config
+        model = ac.get("model")
+        if model:
+            self.runtime.model_manager.set_override("agent", model)
+        if "max_steps" in ac:
+            self.runtime.max_steps = int(ac["max_steps"])
+        if "temperature" in ac:
+            self.runtime.temps["agent"] = float(ac["temperature"])
+        self.runtime._agent_system_extra = ac.get("system_prompt", "")
 
     # runs in worker thread
     def _emit(self, payload: dict):
@@ -230,17 +412,19 @@ class ChatSession:
             resolved.append(entry)
         return resolved
 
-    def start_run(self, user_input: str, attachments_meta: list[dict] | None = None, project_context: str | None = None):
+    def start_run(self, user_input: str, attachments_meta: list[dict] | None = None, project_context: str | None = None, force_mode: str | None = None):
         self.stop_flag.clear()
         resolved_atts = self._resolve_attachments(attachments_meta) if attachments_meta else None
         if project_context:
             self.runtime._project_context = project_context
         else:
             self.runtime._project_context = ""
+        if force_mode == "agent":
+            self.apply_agent_config()
 
         def work():
             try:
-                for item in self.runtime.run_stream(user_input, resolved_atts):
+                for item in self.runtime.run_stream(user_input, resolved_atts, force_mode):
                     if self.stop_flag.is_set():
                         self._emit({"type": "thinking", "text": "Stopped by user", "detail": "Generation was cancelled by the user"})
                         break
@@ -971,12 +1155,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
         task = task_queue.get(task_id)
         if not task:
             return {"error": "not found"}
-        from .core.model_manager import ModelManager
-        from .core.runtime import CozmoRuntime
-        def factory():
-            mm = ModelManager(cfg.get("models", {}))
-            return CozmoRuntime(model_manager=mm, cfg=cfg)
-        task_queue.run_task(task, factory)
+        task_queue.run_task(task, lambda: build_runtime(cfg))
         return task.to_dict()
 
     @app.post("/api/tasks/{task_id}/cancel")
@@ -995,7 +1174,9 @@ def create_app(cfg: dict | None = None) -> FastAPI:
     @app.websocket("/ws/chat")
     async def ws_chat(ws: WebSocket):
         await ws.accept()
-        session = ChatSession(cfg, asyncio.get_running_loop())
+        loop = asyncio.get_running_loop()
+        conn_id = _register_sender(loop, ws)
+        session = ChatSession(cfg, loop)
 
         async def pump_events():
             while True:
@@ -1032,6 +1213,103 @@ def create_app(cfg: dict | None = None) -> FastAPI:
                                 break
                     session.current_conv_id = conv_id
                     session.start_run(content, attachments_meta, project_context)
+                elif mtype == "agent_config":
+                    session.agent_config = {k: v for k, v in msg.items() if k not in ("type",)}
+                    await ws.send_text(json.dumps({"type": "agent_config", **session.agent_config}))
+                elif mtype == "background_run":
+                    goal = (msg.get("goal") or "").strip()
+                    if not goal:
+                        continue
+                    run_id = _start_background_run(goal, cfg)
+                    await ws.send_text(json.dumps({
+                        "type": "background_run_update", "run_id": run_id,
+                        "status": "queued", "goal": goal
+                    }))
+                elif mtype == "background_run_stop":
+                    run_id = msg.get("run_id", "")
+                    _stop_background_run(run_id)
+                elif mtype == "background_run_list":
+                    runs = _list_background_runs()
+                    await ws.send_text(json.dumps({"type": "background_run_list", "runs": runs}))
+                elif mtype == "background_run_logs":
+                    run_id = msg.get("run_id", "")
+                    logs = _get_background_run_logs(run_id)
+                    await ws.send_text(json.dumps({"type": "background_run_logs", "run_id": run_id, "logs": logs}))
+                elif mtype == "schedule_create":
+                    goal = (msg.get("goal") or "").strip()
+                    if not goal:
+                        continue
+                    desc = msg.get("description", "")
+                    interval = int(msg.get("interval_minutes", 0))
+                    _ensure_scheduler(cfg)
+                    s = _scheduler_inst.add(goal, desc, interval)
+                    await ws.send_text(json.dumps({"type": "schedule_created", "schedule": s.to_dict()}))
+                elif mtype == "schedule_list":
+                    _ensure_scheduler(cfg)
+                    schedules = [s.to_dict() for s in _scheduler_inst.list()]
+                    await ws.send_text(json.dumps({"type": "schedule_list", "schedules": schedules}))
+                elif mtype == "schedule_delete":
+                    _ensure_scheduler(cfg)
+                    sid = msg.get("schedule_id", "")
+                    ok = _scheduler_inst.remove(sid)
+                    await ws.send_text(json.dumps({"type": "schedule_deleted", "schedule_id": sid, "ok": ok}))
+                elif mtype == "schedule_toggle":
+                    _ensure_scheduler(cfg)
+                    sid = msg.get("schedule_id", "")
+                    ok = _scheduler_inst.toggle(sid)
+                    s = _scheduler_inst.get(sid)
+                    await ws.send_text(json.dumps({
+                        "type": "schedule_toggled", "schedule_id": sid,
+                        "ok": ok, "enabled": s.enabled if s else False
+                    }))
+                elif mtype == "agent_memory":
+                    action = msg.get("action")
+                    b = get_backend(cfg)
+                    mem = b.get("memory")
+                    if action == "save":
+                        text = msg.get("text", "")
+                        mem_type = msg.get("memory_type", "fact")
+                        if mem and text:
+                            if mem_type == "preference":
+                                mem.store_preference(msg.get("key", "unknown"), text)
+                            elif mem_type == "fact":
+                                mem.store_fact(text, msg.get("tags"))
+                            else:
+                                mem.add_interaction(msg.get("user", ""), text)
+                            await ws.send_text(json.dumps({"type": "agent_memory", "action": "saved"}))
+                        else:
+                            await ws.send_text(json.dumps({"type": "agent_memory", "action": "error", "error": "no text"}))
+                    elif action == "recall":
+                        query = msg.get("query", "")
+                        k = msg.get("k", 5)
+                        if mem and query:
+                            results = mem.query(query, k=k)
+                            await ws.send_text(json.dumps({"type": "agent_memory", "action": "results", "results": results}))
+                        else:
+                            await ws.send_text(json.dumps({"type": "agent_memory", "action": "results", "results": []}))
+                elif mtype == "agent_tasks":
+                    action = msg.get("action")
+                    if action == "list":
+                        status_filter = msg.get("status", "")
+                        s = TaskStatus(status_filter) if status_filter else None
+                        tasks = task_queue.list_tasks(s)
+                        await ws.send_text(json.dumps({
+                            "type": "agent_tasks", "action": "list",
+                            "tasks": [t.to_dict() for t in tasks]
+                        }))
+                    elif action == "create":
+                        desc = msg.get("description", "")
+                        prompt = msg.get("prompt", "")
+                        agent = msg.get("agent_type", "general")
+                        if prompt:
+                            task = task_queue.add(desc, prompt, agent)
+                            await ws.send_text(json.dumps({
+                                "type": "agent_tasks", "action": "created", "task": task.to_dict()
+                            }))
+                        else:
+                            await ws.send_text(json.dumps({
+                                "type": "agent_tasks", "action": "error", "error": "prompt required"
+                            }))
                 elif mtype == "stop":
                     session.stop()
                 elif mtype == "permission_response":
@@ -1166,7 +1444,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
                         pidx = _projects_idx()
                         pidx["projects"].insert(0, project)
                         _save_projects_idx(pidx)
-                        # Set as current collab context
+                        # Set as current agent task context
                         session.runtime.project_index = idx
                         session.runtime._project_context = f"Project: {name} at {project_dir}"
                         project["path"] = str(project_dir)
@@ -1199,6 +1477,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
             session.stop()
         finally:
             pump.cancel()
+            _unregister_sender(conn_id)
 
     # serve the built frontend when present (dev uses vite on :5173 instead)
     if DIST_DIR.exists():

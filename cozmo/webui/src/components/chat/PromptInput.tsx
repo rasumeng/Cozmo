@@ -1,11 +1,11 @@
 import { useEffect, useState, useRef, useCallback } from 'react'
 import { Paperclip, ArrowUp, Square, Mic, Plus, Folder, Puzzle, Cable, X, ChevronRight, Settings, FolderOpen } from 'lucide-react'
-import { Attachment, Project, Skill, WorkspaceMode, CollabProjectFile } from '@/types'
+import { Attachment, Project, Skill, WorkspaceMode, AgentTaskFile } from '@/types'
 import { fetchSkills } from '@/services/cozmo'
 import type { SectionId } from '@/components/settings/SettingsModal'
 import { DirectoryPicker } from './DirectoryPicker'
 import { PermissionModeSelector } from './PermissionModeSelector'
-import { CollabProjectPopup } from './CollabProjectPopup'
+import { AgentTaskPopup } from './AgentTaskPopup'
 
 const API_BASE = import.meta.env.DEV ? 'http://localhost:8765' : ''
 
@@ -68,10 +68,10 @@ interface Props {
   onSetDirectory?: (path: string) => void
   permissionMode?: string
   onSetPermissionMode?: (mode: string) => void
-  collabProject?: Project | null
+  agentTask?: Project | null
   onListProjects?: (search?: string) => void
   onSelectProject?: (id: string) => void
-  onCreateProject?: (data: { name: string; description: string; instructions: string; files: CollabProjectFile[]; location: string }) => void
+  onCreateTask?: (data: { name: string; description: string; instructions: string; files: AgentTaskFile[]; location: string }) => void
   onImportChat?: (ids: string[]) => void
 }
 
@@ -94,16 +94,16 @@ export function PromptInput({
   onSetDirectory,
   permissionMode,
   onSetPermissionMode,
-  collabProject,
+  agentTask,
   onListProjects,
   onSelectProject,
-  onCreateProject,
+  onCreateTask,
   onImportChat,
 }: Props) {
   const [value, setValue] = useState('')
   const [menuOpen, setMenuOpen] = useState(false)
   const [activeSubmenu, setActiveSubmenu] = useState<string | null>(null)
-  const [showCollabPopup, setShowCollabPopup] = useState(false)
+  const [showTaskPopup, setShowTaskPopup] = useState(false)
   const [micState, setMicState] = useState<'idle' | 'listening' | 'recording'>('idle')
   const micStateRef = useRef<'idle' | 'listening' | 'recording'>('idle')
   const recognitionRef = useRef<SpeechRecognition | null>(null)
@@ -585,23 +585,23 @@ export function PromptInput({
           {mode === 'code' && onSetPermissionMode && (
             <PermissionModeSelector mode={permissionMode || 'manual'} onChange={onSetPermissionMode} />
           )}
-          {mode === 'collab' && onListProjects && (
+          {mode === 'agent' && onListProjects && (
             <div className="relative">
               <button
-                onClick={() => setShowCollabPopup(v => !v)}
+                onClick={() => setShowTaskPopup(v => !v)}
                 className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-medium text-base-300 hover:bg-base-800 hover:text-base-100 transition-colors"
               >
                 <FolderOpen size={13} />
-                {collabProject ? collabProject.name : 'No Project'}
+                {agentTask ? agentTask.name : 'No Task'}
               </button>
-              {showCollabPopup && (
-                <CollabProjectPopup
-                  collabProject={collabProject || null}
+              {showTaskPopup && (
+                <AgentTaskPopup
+                  agentTask={agentTask || null}
                   projects={projects}
-                  onClose={() => setShowCollabPopup(false)}
+                  onClose={() => setShowTaskPopup(false)}
                   onSelectProject={(id) => onSelectProject?.(id)}
                   onListProjects={(s) => onListProjects(s)}
-                  onCreateProject={(d) => onCreateProject?.(d)}
+                  onCreateTask={(d) => onCreateTask?.(d)}
                   onImportChat={(ids) => onImportChat?.(ids)}
                   onSetDirectory={(p) => onSetDirectory?.(p)}
                 />

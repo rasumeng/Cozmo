@@ -1,7 +1,7 @@
 // WebSocket client for the Cozmo FastAPI backend (cozmo/webui_server.py).
 // Reconnects automatically; events are fanned out to a single handler.
 
-import { Conversation, Attachment, Project, Skill, McpCatalogEntry, McpStatusResponse, McpServerDetail, DiffData, CollabProjectCreate } from '@/types'
+import { Conversation, Attachment, Project, Skill, McpCatalogEntry, McpStatusResponse, McpServerDetail, DiffData, AgentTaskCreate, AgentConfig, TaskData, BackgroundRunInfo, BackgroundRunLog, ScheduledTaskInfo } from '@/types'
 
 export type ServerEvent =
   | { type: 'token'; text: string }
@@ -10,6 +10,17 @@ export type ServerEvent =
   | { type: 'plan'; plan: string }
   | { type: 'tool_call'; tool: string; args: Record<string, unknown>; id: string }
   | { type: 'tool_result'; tool: string; result: string; id: string; diff?: DiffData }
+  | { type: 'agent_config'; model?: string; system_prompt?: string; max_steps?: number; temperature?: number }
+  | { type: 'agent_memory'; action: string; results?: Array<Record<string, unknown>>; error?: string }
+  | { type: 'agent_tasks'; action: string; tasks?: TaskData[]; task?: TaskData; error?: string }
+  | { type: 'background_run_update'; run_id: string; status: string; goal?: string; step?: string; error?: string }
+  | { type: 'background_run_log'; run_id: string; log_type: 'tool_call' | 'tool_result'; tool?: string; args?: Record<string, unknown>; result?: string; call_id?: string }
+  | { type: 'background_run_list'; runs: BackgroundRunInfo[] }
+  | { type: 'background_run_logs'; run_id: string; logs: BackgroundRunLog[] }
+  | { type: 'schedule_list'; schedules: ScheduledTaskInfo[] }
+  | { type: 'schedule_created'; schedule: ScheduledTaskInfo }
+  | { type: 'schedule_deleted'; schedule_id: string; ok: boolean }
+  | { type: 'schedule_toggled'; schedule_id: string; ok: boolean; enabled: boolean }
   | { type: 'directory_set'; path: string; indexed: number }
   | { type: 'projects_list'; projects: Project[] }
   | { type: 'recent_conversations'; conversations: { id: string; title: string; mode: string; updatedAt: string }[] }
@@ -106,11 +117,44 @@ export class CozmoClient {
   importFromChat(conversationIds: string[]) {
     return this.send({ type: 'import_from_chat', conversation_ids: conversationIds })
   }
-  createProject(data: CollabProjectCreate) {
+  createProject(data: AgentTaskCreate) {
     return this.send({ type: 'create_project', ...data })
   }
   selectProject(projectId: string) {
     return this.send({ type: 'select_project', project_id: projectId })
+  }
+  sendAgentConfig(config: AgentConfig) {
+    return this.send({ type: 'agent_config', ...config })
+  }
+  agentMemory(action: 'save' | 'recall', data: Record<string, unknown>) {
+    return this.send({ type: 'agent_memory', action, ...data })
+  }
+  agentTasks(action: 'list' | 'create', data?: Record<string, unknown>) {
+    return this.send({ type: 'agent_tasks', action, ...data })
+  }
+  startBackgroundRun(goal: string) {
+    return this.send({ type: 'background_run', goal })
+  }
+  stopBackgroundRun(runId: string) {
+    return this.send({ type: 'background_run_stop', run_id: runId })
+  }
+  listBackgroundRuns() {
+    return this.send({ type: 'background_run_list' })
+  }
+  getBackgroundRunLogs(runId: string) {
+    return this.send({ type: 'background_run_logs', run_id: runId })
+  }
+  createSchedule(goal: string, description: string, intervalMinutes: number) {
+    return this.send({ type: 'schedule_create', goal, description, interval_minutes: intervalMinutes })
+  }
+  listSchedules() {
+    return this.send({ type: 'schedule_list' })
+  }
+  deleteSchedule(scheduleId: string) {
+    return this.send({ type: 'schedule_delete', schedule_id: scheduleId })
+  }
+  toggleSchedule(scheduleId: string) {
+    return this.send({ type: 'schedule_toggle', schedule_id: scheduleId })
   }
   reset() {
     return this.send({ type: 'reset' })

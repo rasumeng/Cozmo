@@ -51,7 +51,7 @@ export function Sidebar({ collapsed, onToggleCollapse, conversations, activeId, 
           {!collapsed && (
             <div className="flex flex-col">
               <span className="font-semibold tracking-tight text-base-100 leading-tight">Cozmo</span>
-              <span className="text-[10px] text-base-500 tracking-wide">AI coding assistant</span>
+              <span className="text-[10px] text-base-500 tracking-wide">AI Agent</span>
             </div>
           )}
         </div>

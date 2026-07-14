@@ -62,7 +62,7 @@ export function ImportFromChatPopup({ onClose, onImport }: Props) {
     })
   }
 
-  const MODE_ICONS: Record<string, string> = { chat: '💬', collab: '🤝', code: '💻' }
+  const MODE_ICONS: Record<string, string> = { chat: '💬', agent: '🤖', code: '💻' }
 
   const convCount = convs.length
   const selCount = selected.size

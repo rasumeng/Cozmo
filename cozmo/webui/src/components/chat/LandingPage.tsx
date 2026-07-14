@@ -1,4 +1,4 @@
-import { MessageSquare, Users, Code2, Sparkles, FileText, GitBranch, Globe, Search, PenTool, Braces, Bug, Workflow, Lightbulb, BookOpen, BarChart3, Mail, FileSymlink } from 'lucide-react'
+import { MessageSquare, Bot, Code2, Sparkles, FileText, GitBranch, Globe, Search, PenTool, Braces, Bug, Workflow, Lightbulb, BookOpen, BarChart3, Mail, FileSymlink } from 'lucide-react'
 import { WorkspaceMode } from '@/components/sidebar/workspaceModes'
 
 interface Props {
@@ -19,11 +19,11 @@ const SUGGESTIONS: Record<WorkspaceMode, SuggestionItem[]> = {
     { icon: Mail, label: 'Draft an email', prompt: 'Draft an email about ' },
     { icon: BarChart3, label: 'Analyze this data', prompt: 'Analyze this data: ' },
   ],
-  collab: [
-    { icon: Lightbulb, label: 'Brainstorm features', prompt: 'Help me brainstorm feature ideas for ' },
-    { icon: Workflow, label: 'Plan architecture', prompt: 'Plan the architecture for ' },
-    { icon: BookOpen, label: 'Write documentation', prompt: 'Write documentation for ' },
-    { icon: PenTool, label: 'Draft a spec', prompt: 'Draft a specification for ' },
+  agent: [
+    { icon: Lightbulb, label: 'Set a goal', prompt: 'Act as my autonomous agent to accomplish this goal: ' },
+    { icon: Workflow, label: 'Execute task', prompt: 'Execute this task autonomously: ' },
+    { icon: BookOpen, label: 'Research & report', prompt: 'Research this topic and deliver a comprehensive report: ' },
+    { icon: GitBranch, label: 'Automate workflow', prompt: 'Design and execute an automated workflow for: ' },
   ],
   code: [
     { icon: FileText, label: 'Explain this code', prompt: 'Explain this code: ' },
@@ -37,7 +37,7 @@ const SUGGESTIONS: Record<WorkspaceMode, SuggestionItem[]> = {
 
 const HEADINGS: Record<WorkspaceMode, { title: string; subtitle: string; icon: React.ElementType }> = {
   chat: { icon: MessageSquare, title: 'Ask Cozmo anything', subtitle: 'Research, summarize, draft, and analyze.' },
-  collab: { icon: Users, title: 'Start a collaborative task', subtitle: 'Brainstorm, plan, write, and create together.' },
+  agent: { icon: Bot, title: 'Start an autonomous agent', subtitle: 'Set goals, execute tasks, research, and automate workflows.' },
   code: { icon: Code2, title: 'Begin a coding session', subtitle: 'Explain, debug, refactor, review, and test code.' },
 }
 
@@ -48,17 +48,17 @@ export function LandingPage({ mode, onSuggestion }: Props) {
 
   const modeColors: Record<WorkspaceMode, string> = {
     chat: 'bg-indigo-500/10 text-indigo-400 border-indigo-500/20',
-    collab: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20',
+    agent: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20',
     code: 'bg-amber-500/10 text-amber-400 border-amber-500/20',
   }
   const modeRing: Record<WorkspaceMode, string> = {
     chat: 'hover:border-indigo-500/30',
-    collab: 'hover:border-emerald-500/30',
+    agent: 'hover:border-emerald-500/30',
     code: 'hover:border-amber-500/30',
   }
   const modeIconBg: Record<WorkspaceMode, string> = {
     chat: 'bg-indigo-500/15',
-    collab: 'bg-emerald-500/15',
+    agent: 'bg-emerald-500/15',
     code: 'bg-amber-500/15',
   }
 

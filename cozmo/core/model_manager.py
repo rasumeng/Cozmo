@@ -12,6 +12,7 @@ ROLE_MODEL_KEY = {
     "work": "coder",
     "research": "research",
     "vision": "vision",
+    "agent": "agent",
 }
 
 class ModelManager:
@@ -25,8 +26,17 @@ class ModelManager:
         self.models_cfg = models_cfg
         self.lightweight_model = lightweight_model
         self._instances: dict[str, OllamaModel] = {}
+        self._overrides: dict[str, str] = {}
+
+    def set_override(self, role: str, model_name: str):
+        self._overrides[role] = model_name
+
+    def clear_override(self, role: str):
+        self._overrides.pop(role, None)
 
     def _model_name(self, role: str) -> str:
+        if role in self._overrides:
+            return self._overrides[role]
         if self.lightweight_model:
             return self.lightweight_model
         cfg_key = ROLE_MODEL_KEY.get(role, "chat")

@@ -156,9 +156,9 @@ _MODE_DISCIPLINE = {
         "that — do not fabricate and do not claim you lack internet access "
         "(you have the web_search tool)."
     ),
-    "collab": (
-        "MODE: COLLAB — structured task execution with an approved plan.\n"
-        "- The user approved the plan below. Execute each step in order.\n"
+    "agent": (
+        "MODE: AGENT — autonomous task execution with goals and plans.\n"
+        "- Execute the approved plan or goal step by step.\n"
         "- Use tools to complete each step. Report progress after each step.\n"
         "- If a step fails, note the failure and continue with remaining steps.\n"
         "- In your final response, summarize what was completed and any issues.\n"
@@ -169,13 +169,13 @@ _MODE_DISCIPLINE = {
 _ROUTE_PROMPT = """Classify the user's latest request as exactly one word:
 - chat: greetings, small talk, definitions, general Q&A answerable from timeless knowledge
 - work: coding, editing files, debugging, shell commands, anything touching the project
-- collab: structured multi-step tasks like writing specs, planning architecture, documenting, brainstorming, researching, creating reports or proposals
+- agent: autonomous multi-step tasks like writing specs, planning architecture, documenting, brainstorming, researching, creating reports or proposals
 - research: needs current/external info (news, events, sports, prices, weather, releases, schedules, "today", "latest", "recent", "next", "upcoming")
 - vision: image generation, image editing, processing .png/.jpeg/.bmp/.gif/.tiff/.webp
 
 Anything about current events or things that change over time is research, even if phrased vaguely.
 When unsure between chat and research, pick research. When it touches code or files, pick work.
-Multi-step tasks that need planning (writing docs, creating specs, architecture design, research reports) → collab.
+Multi-step tasks that need planning (writing docs, creating specs, architecture design, research reports) → agent.
 
 Examples:
 - "what's the weather in new york" → research
@@ -183,15 +183,15 @@ Examples:
 - "who won the super bowl" → research
 - "edit main.py and fix the bug" → work
 - "what is a monad" → chat
-- "help me brainstorm feature ideas" → collab
-- "write a spec for the auth system" → collab
-- "plan the architecture for a new feature" → collab
-- "draft documentation for the API" → collab
+- "help me brainstorm feature ideas" → agent
+- "write a spec for the auth system" → agent
+- "plan the architecture for a new feature" → agent
+- "draft documentation for the API" → agent
 - "summarize this article about AI" → research
-- "create a presentation outline" → collab
+- "create a presentation outline" → agent
 - "fix the typo in README.md" → work
 - "explain how DNS works" → chat
-- "research competitors in the AI space" → collab
+- "research competitors in the AI space" → agent
 
 Recent conversation (for context on vague follow-ups):
 {history}
@@ -278,7 +278,7 @@ class CozmoRuntime:
             "chat": temps.get("chat", 0.6),
             "work": temps.get("work", 0.0),
             "research": temps.get("research", 0.2),
-            "collab": temps.get("collab", 0.2),
+            "agent": temps.get("agent", 0.2),
             "vision": temps.get("vision", 0.2),
         }
 
@@ -287,7 +287,7 @@ class CozmoRuntime:
             "chat": [],
             "research": ["web_search", "web_search_pipeline", "web_fetch", "calculator"],
             "work": None,
-            "collab": None,
+            "agent": None,
             "vision": [],
         })
 
@@ -304,6 +304,7 @@ class CozmoRuntime:
             f"{n} ({s['description'][:60]})" for n, s in self._skills.items()
         ) if self._skills else "(none installed)"
         self.stop_event: threading.Event | None = None
+        self._agent_system_extra: str = ""
 
     def _check_stop(self):
         """Stop the generator early if stop_event was set."""
@@ -316,7 +317,7 @@ class CozmoRuntime:
         self._permission_callback = callback
 
     def set_plan_callback(self, callback):
-        """callback(plan_text) -> bool. Set by the UI layer for collab plan approval."""
+        """callback(plan_text) -> bool. Set by the UI layer for agent plan approval."""
         self._plan_callback = callback
 
     # ── langchain tool wrappers ──────────────────────────────────────────
@@ -370,6 +371,9 @@ class CozmoRuntime:
                        activated_skills: list[dict] | None = None) -> str:
         parts = [_IDENTITY.format(date=datetime.now().strftime("%A, %B %d, %Y"))]
         parts.append(_MODE_DISCIPLINE.get(mode, _MODE_DISCIPLINE["chat"]))
+
+        if self._agent_system_extra:
+            parts.append(f"AGENT INSTRUCTIONS:\n{self._agent_system_extra}")
 
         personality = (self.cfg.get("personality") or "").strip()
         if personality:
@@ -471,7 +475,7 @@ class CozmoRuntime:
         raw = self.router_llm.invoke(
             _ROUTE_PROMPT.format(history=recent, text=user_input)
         ).strip().lower()
-        for mode in ("collab", "work", "research", "chat"):
+        for mode in ("agent", "work", "research", "chat"):
             if mode in raw:
                 return mode
         # Unparseable classifier output: chat is the cheap, safe default.
@@ -511,9 +515,9 @@ class CozmoRuntime:
                 return ""
         return ""
 
-    # ── collab mode: plan generation ──────────────────────────────────────
+    # ── agent mode: plan generation ──────────────────────────────────────
 
-    def _gather_collab_context(self, user_input: str) -> str:
+    def _gather_agent_context(self, user_input: str) -> str:
         """Gather memory, project info, and search results for plan context."""
         parts = []
         memory = self._query_memory(user_input)
@@ -660,7 +664,7 @@ class CozmoRuntime:
                 content.append({"type": "text", "text": f"[Image: {att['name']} — failed to load]"})
         return content
 
-    def run_stream(self, user_input: str, attachments: list[dict] | None = None):
+    def run_stream(self, user_input: str, attachments: list[dict] | None = None, force_mode: str | None = None):
         """Yield (kind, text) tuples. kind is 'token', 'thinking', or 'status'."""
         try:
             has_images = attachments and any(a.get("type") == "image" for a in attachments)
@@ -669,7 +673,7 @@ class CozmoRuntime:
             activated_skills: list[dict] = self._scan_skills(user_input, [])
 
             yield ("status", "Routing...")
-            mode = self._route(user_input) if not has_images else "vision"
+            mode = (force_mode or self._route(user_input)) if not has_images else "vision"
             if activated_skills:
                 names = ", ".join(s["name"] for s in activated_skills)
                 yield ("thinking", f"Mode: {mode} — Skills: {names}", f"Operating in {mode} mode with skills: {names}", None)
@@ -680,18 +684,22 @@ class CozmoRuntime:
             if mode == "research":
                 yield ("thinking", "Searching...", "Searching the web for context", user_input)
                 grounding = self._grounding_search(user_input)
-            elif mode == "collab":
+            elif mode == "agent":
+                yield ("agent_status", "planning", user_input, None)
                 yield ("thinking", "Planning...", "Generating a plan for review", user_input)
-                context = self._gather_collab_context(user_input)
+                context = self._gather_agent_context(user_input)
                 plan = self._generate_plan(user_input, context)
                 yield ("plan", plan, "Review and approve the proposed plan", None)
+                yield ("agent_status", "waiting", user_input, "Awaiting plan approval")
                 approved = True
                 if self._plan_callback:
                     approved = self._plan_callback(plan)
                 if not approved:
+                    yield ("agent_status", "done", user_input, "Plan rejected")
                     yield ("token", "Plan not approved. Please refine your request and try again.")
                     return
                 grounding = f"APPROVED PLAN:\n{plan}\n\nExecute each step of this approved plan in order. Report progress after each step."
+                yield ("agent_status", "executing", user_input, "Starting execution")
 
             temp = self.temps.get(mode, 0.0)
             lc_tools = self._tools_for_mode(mode)
@@ -723,7 +731,8 @@ class CozmoRuntime:
                 suppress = False
                 streamed = False
 
-                if mode == "collab":
+                if mode == "agent":
+                    yield ("agent_status", "executing", user_input, f"Step {step + 1}/{self.max_steps}")
                     yield ("thinking", f"Step {step + 1}/{self.max_steps}",
                            f"Executing step {step + 1}", None)
 
@@ -790,8 +799,8 @@ class CozmoRuntime:
                     else:
                         seen_calls.add(sig)
                         out = self._exec_tool(c["name"], c["args"])
-                    # Track failures for collab error recovery
-                    if mode == "collab" and out.startswith("Error"):
+                    # Track failures for agent error recovery
+                    if mode == "agent" and out.startswith("Error"):
                         failed_steps.append(f"Step {step + 1}: {c['name']} failed — {out[:200]}")
                     diff = self._compute_diff(c["name"], c["args"])
                     yield ("tool_result", c["name"], out, call_id, diff)
@@ -812,8 +821,8 @@ class CozmoRuntime:
                          "got to — ask me to continue if you want me to keep going.")
                 yield ("token", final)
 
-            # Collab error recovery: append failure summary
-            if mode == "collab" and failed_steps:
+            # Agent error recovery: append failure summary
+            if mode == "agent" and failed_steps:
                 fail_summary = "\n\n**Issues encountered:**\n" + "\n".join(f"- {f}" for f in failed_steps)
                 final = (final or "") + fail_summary
                 yield ("token", fail_summary)

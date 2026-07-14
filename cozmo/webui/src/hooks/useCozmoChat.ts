@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Conversation, ActivityStep, WorkspaceMode, Attachment, Project, PlanData, TerminalEntry, DiffEntry, CollabProjectCreate } from '@/types'
+import { Conversation, ActivityStep, WorkspaceMode, Attachment, Project, PlanData, TerminalEntry, DiffEntry, AgentTaskCreate, BackgroundRunInfo, BackgroundRunLog, ScheduledTaskInfo } from '@/types'
 import { CozmoClient, ConnectionState, ServerEvent, fetchConversations, saveConversation, deleteConversationApi, fetchProjects, createProject, updateProject, deleteProjectApi, fetchProjectConversations } from '@/services/cozmo'
 
 export interface PermissionRequest {
@@ -28,7 +28,9 @@ export function useCozmoChat() {
   const [currentDirectory, setCurrentDirectory] = useState('./')
   const [permissionMode, setPermissionMode] = useState('manual')
   const [recentConversations, setRecentConversations] = useState<{ id: string; title: string; mode: string; updatedAt: string }[]>([])
-  const [collabProject, setCollabProject] = useState<Project | null>(null)
+  const [agentTask, setAgentTask] = useState<Project | null>(null)
+  const [backgroundRuns, setBackgroundRuns] = useState<BackgroundRunInfo[]>([])
+  const [schedules, setSchedules] = useState<ScheduledTaskInfo[]>([])
   const [draftMode, setDraftMode] = useState<WorkspaceMode>('chat')
   const [projects, setProjects] = useState<Project[]>([])
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null)
@@ -179,11 +181,45 @@ export function useCozmoChat() {
           setRecentConversations(ev.conversations)
           break
         case 'project_created':
-          setCollabProject(ev.project)
+          setAgentTask(ev.project)
           setProjects(prev => [ev.project, ...prev])
           break
         case 'project_selected':
-          setCollabProject(ev.project)
+          setAgentTask(ev.project)
+          break
+        case 'background_run_update':
+          setBackgroundRuns(prev => {
+            const idx = prev.findIndex(r => r.run_id === ev.run_id)
+            const run: BackgroundRunInfo = {
+              run_id: ev.run_id,
+              goal: ev.goal ?? '',
+              status: ev.status,
+              created: prev[idx]?.created ?? new Date().toISOString(),
+              ended: ev.status === 'done' || ev.status === 'error' || ev.status === 'cancelled'
+                ? new Date().toISOString() : '',
+            }
+            if (idx >= 0) {
+              const next = [...prev]
+              next[idx] = run
+              return next
+            }
+            return [run, ...prev]
+          })
+          break
+        case 'background_run_list':
+          setBackgroundRuns(ev.runs)
+          break
+        case 'schedule_list':
+          setSchedules(ev.schedules)
+          break
+        case 'schedule_created':
+          setSchedules(prev => [ev.schedule, ...prev])
+          break
+        case 'schedule_deleted':
+          setSchedules(prev => prev.filter(s => s.id !== ev.schedule_id))
+          break
+        case 'schedule_toggled':
+          setSchedules(prev => prev.map(s => s.id === ev.schedule_id ? { ...s, enabled: ev.enabled } : s))
           break
         case 'permission_request':
           setPermission({ tool: ev.tool, args: ev.args })
@@ -310,12 +346,42 @@ export function useCozmoChat() {
     clientRef.current?.importFromChat(conversationIds)
   }, [])
 
-  const handleCollabCreateProject = useCallback((data: CollabProjectCreate) => {
+  const handleAgentCreateTask = useCallback((data: AgentTaskCreate) => {
     clientRef.current?.createProject(data)
   }, [])
 
   const handleSelectProject = useCallback((projectId: string) => {
     clientRef.current?.selectProject(projectId)
+  }, [])
+
+  const handleStartBackgroundRun = useCallback((goal: string) => {
+    if (!goal.trim()) return
+    clientRef.current?.startBackgroundRun(goal.trim())
+  }, [])
+
+  const handleStopBackgroundRun = useCallback((runId: string) => {
+    clientRef.current?.stopBackgroundRun(runId)
+  }, [])
+
+  const handleRefreshBackgroundRuns = useCallback(() => {
+    clientRef.current?.listBackgroundRuns()
+  }, [])
+
+  const handleListSchedules = useCallback(() => {
+    clientRef.current?.listSchedules()
+  }, [])
+
+  const handleCreateSchedule = useCallback((goal: string, description: string, intervalMinutes: number) => {
+    if (!goal.trim()) return
+    clientRef.current?.createSchedule(goal.trim(), description, intervalMinutes)
+  }, [])
+
+  const handleDeleteSchedule = useCallback((scheduleId: string) => {
+    clientRef.current?.deleteSchedule(scheduleId)
+  }, [])
+
+  const handleToggleSchedule = useCallback((scheduleId: string) => {
+    clientRef.current?.toggleSchedule(scheduleId)
   }, [])
 
   const newChat = useCallback((mode: WorkspaceMode = 'chat') => {
@@ -405,14 +471,23 @@ export function useCozmoChat() {
     currentDirectory,
     permissionMode,
     recentConversations,
-    collabProject,
+    agentTask,
+    backgroundRuns,
+    schedules,
     sendMessage,
     setPermissionMode: handleSetPermissionMode,
     listProjects: handleListProjects,
     getRecentConversations: handleGetRecentConversations,
     importFromChat: handleImportFromChat,
-    collabCreateProject: handleCollabCreateProject,
+    agentCreateTask: handleAgentCreateTask,
     selectProject: handleSelectProject,
+    startBackgroundRun: handleStartBackgroundRun,
+    stopBackgroundRun: handleStopBackgroundRun,
+    refreshBackgroundRuns: handleRefreshBackgroundRuns,
+    listSchedules: handleListSchedules,
+    createSchedule: handleCreateSchedule,
+    deleteSchedule: handleDeleteSchedule,
+    toggleSchedule: handleToggleSchedule,
     stop,
     answerPermission,
     answerPlan,

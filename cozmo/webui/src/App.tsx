@@ -5,6 +5,7 @@ import { ActivityPanel } from '@/components/activity/ActivityPanel'
 import { RightPanel } from '@/components/activity/RightPanel'
 import { PermissionModal } from '@/components/common/PermissionModal'
 import { ProjectsPanel } from '@/components/projects/ProjectsPanel'
+
 import { SettingsModal, SectionId } from '@/components/settings/SettingsModal'
 import { useCozmoChat } from '@/hooks/useCozmoChat'
 import { WorkspaceMode } from '@/types'
@@ -102,10 +103,10 @@ export default function App() {
             permissionMode={chat.permissionMode}
             onSetPermissionMode={chat.setPermissionMode}
             diffEntries={chat.diffEntries}
-            collabProject={chat.collabProject}
+            agentTask={chat.agentTask}
             onListProjects={chat.listProjects}
             onSelectProject={chat.selectProject}
-            onCreateProject={chat.collabCreateProject}
+            onCreateTask={chat.agentCreateTask}
             onImportChat={chat.importFromChat}
           />
         )}

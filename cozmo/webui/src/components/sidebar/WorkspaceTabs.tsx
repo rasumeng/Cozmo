@@ -1,10 +1,10 @@
 import clsx from 'clsx'
-import { MessageSquare, Users, Code2 } from 'lucide-react'
+import { MessageSquare, Bot, Code2 } from 'lucide-react'
 import { WorkspaceMode } from './workspaceModes'
 
 const TABS: { id: WorkspaceMode; label: string; icon: React.ElementType }[] = [
   { id: 'chat', label: 'Chat', icon: MessageSquare },
-  { id: 'collab', label: 'Collab', icon: Users },
+  { id: 'agent', label: 'Agent', icon: Bot },
   { id: 'code', label: 'Code', icon: Code2 },
 ]
 

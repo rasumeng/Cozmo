@@ -1,30 +1,30 @@
 import { useState, useEffect, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { Folder, FolderOpen, Plus, MessageSquare, Search, Check } from 'lucide-react'
-import { Project, CollabProjectFile } from '@/types'
+import { Project, AgentTaskFile } from '@/types'
 import { CreateProjectWizard } from './CreateProjectWizard'
 import { ImportFromChatPopup } from './ImportFromChatPopup'
 
 const API_BASE = import.meta.env.DEV ? 'http://localhost:8765' : ''
 
 interface Props {
-  collabProject: Project | null
+  agentTask: Project | null
   projects: Project[]
   onClose: () => void
   onSelectProject: (id: string) => void
   onListProjects: (search?: string) => void
-  onCreateProject: (data: { name: string; description: string; instructions: string; files: CollabProjectFile[]; location: string }) => void
+  onCreateTask: (data: { name: string; description: string; instructions: string; files: AgentTaskFile[]; location: string }) => void
   onImportChat: (ids: string[]) => void
   onSetDirectory: (path: string) => void
 }
 
-export function CollabProjectPopup({
-  collabProject,
+export function AgentTaskPopup({
+  agentTask,
   projects,
   onClose,
   onSelectProject,
   onListProjects,
-  onCreateProject,
+  onCreateTask,
   onImportChat,
   onSetDirectory,
 }: Props) {
@@ -60,7 +60,7 @@ export function CollabProjectPopup({
             <input
               value={search}
               onChange={e => setSearch(e.target.value)}
-              placeholder="Search projects..."
+              placeholder="Search tasks..."
               className="w-full pl-7 pr-2.5 py-1.5 rounded-lg bg-base-900 border border-base-700 text-[12px] text-base-200 placeholder:text-base-600 outline-none focus:border-accent"
             />
           </div>
@@ -68,10 +68,10 @@ export function CollabProjectPopup({
 
         <div className="max-h-[220px] overflow-y-auto px-1.5 py-1 space-y-0.5">
           {filtered.length === 0 && (
-            <p className="text-[11px] text-base-600 px-2 py-3 text-center">No projects yet</p>
+            <p className="text-[11px] text-base-600 px-2 py-3 text-center">No tasks yet</p>
           )}
           {filtered.map(p => {
-            const active = collabProject?.id === p.id
+            const active = agentTask?.id === p.id
             return (
               <button
                 key={p.id}
@@ -96,7 +96,7 @@ export function CollabProjectPopup({
         <div className="px-1.5 pb-1.5 space-y-0.5">
           <button onClick={() => setShowCreate(true)} className="w-full flex items-center gap-2.5 px-2.5 py-1.5 rounded-lg text-[11px] text-base-300 hover:bg-base-800 transition-colors">
             <Plus size={13} className="text-emerald-400" />
-            Create New Project
+            Create New Task
           </button>
           <button onClick={() => setShowImport(true)} className="w-full flex items-center gap-2.5 px-2.5 py-1.5 rounded-lg text-[11px] text-base-300 hover:bg-base-800 transition-colors">
             <MessageSquare size={13} className="text-blue-400" />
@@ -124,7 +124,7 @@ export function CollabProjectPopup({
       {showCreate && createPortal(
         <CreateProjectWizard
           onClose={() => setShowCreate(false)}
-          onCreate={(data) => { onCreateProject(data); setShowCreate(false); onClose() }}
+          onCreate={(data) => { onCreateTask(data); setShowCreate(false); onClose() }}
         />,
         document.body
       )}

@@ -21,7 +21,7 @@ export interface ChatMessage {
   attachments?: Attachment[]
 }
 
-export type WorkspaceMode = 'chat' | 'collab' | 'code'
+export type WorkspaceMode = 'chat' | 'agent' | 'code'
 
 export interface Conversation {
   id: string
@@ -158,17 +158,74 @@ export interface McpStatusResponse {
   [serverName: string]: McpServerStatus
 }
 
-export interface CollabProjectFile {
+export interface AgentTaskFile {
   name: string
   content: string
 }
 
-export interface CollabProjectCreate {
+export interface AgentTaskCreate {
   name: string
   description?: string
   instructions?: string
-  files?: CollabProjectFile[]
+  files?: AgentTaskFile[]
   location: string
+}
+
+export type AgentStatus = 'idle' | 'planning' | 'executing' | 'waiting' | 'done' | 'error'
+
+export interface AgentToolCall {
+  id: string
+  tool: string
+  args: Record<string, unknown>
+  result: string
+  timestamp: number
+}
+
+export interface AgentConfig {
+  model?: string
+  system_prompt?: string
+  max_steps?: number
+  temperature?: number
+}
+
+export interface TaskData {
+  id: string
+  description: string
+  prompt: string
+  agent_type: string
+  status: string
+  created: string
+  result: string
+  error: string
+  goal?: string
+  mode?: string
+}
+
+export interface BackgroundRunInfo {
+  run_id: string
+  goal: string
+  status: string
+  created: string
+  ended: string
+}
+
+export interface BackgroundRunLog {
+  log_type: 'tool_call' | 'tool_result'
+  tool?: string
+  args?: Record<string, unknown>
+  result?: string
+  call_id?: string
+}
+
+export interface ScheduledTaskInfo {
+  id: string
+  goal: string
+  description: string
+  interval_minutes: number
+  next_run: string
+  enabled: boolean
+  created: string
+  last_run: string
 }
 
 export interface McpServerDetail {

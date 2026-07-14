@@ -1,10 +1,10 @@
 import { useState, useRef } from 'react'
 import { X, Plus, Trash2, Folder } from 'lucide-react'
-import { CollabProjectFile } from '@/types'
+import { AgentTaskFile } from '@/types'
 
 interface Props {
   onClose: () => void
-  onCreate: (data: { name: string; description: string; instructions: string; files: CollabProjectFile[]; location: string }) => void
+  onCreate: (data: { name: string; description: string; instructions: string; files: AgentTaskFile[]; location: string }) => void
 }
 
 const API_BASE = import.meta.env.DEV ? 'http://localhost:8765' : ''
@@ -13,7 +13,7 @@ export function CreateProjectWizard({ onClose, onCreate }: Props) {
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
   const [instructions, setInstructions] = useState('')
-  const [files, setFiles] = useState<CollabProjectFile[]>([])
+  const [files, setFiles] = useState<AgentTaskFile[]>([])
   const [location, setLocation] = useState('')
   const [picking, setPicking] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -22,7 +22,7 @@ export function CreateProjectWizard({ onClose, onCreate }: Props) {
     const fileList = e.target.files
     if (!fileList) return
     const remaining = Array.from(fileList)
-    const results: CollabProjectFile[] = []
+    const results: AgentTaskFile[] = []
 
     const readNext = () => {
       if (remaining.length === 0) {

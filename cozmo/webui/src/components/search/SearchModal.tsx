@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Search, X, MessageSquare, Users, TerminalSquare } from 'lucide-react'
+import { Search, X, MessageSquare, Bot, TerminalSquare } from 'lucide-react'
 
 const API_BASE = import.meta.env.DEV ? 'http://localhost:8765' : ''
 
@@ -20,7 +20,7 @@ interface Props {
 
 const MODE_ICONS: Record<string, React.ElementType> = {
   chat: MessageSquare,
-  collab: Users,
+  agent: Bot,
   code: TerminalSquare,
 }
 

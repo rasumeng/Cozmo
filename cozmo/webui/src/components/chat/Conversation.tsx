@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { Sparkles, PanelRightClose, PanelRightOpen } from 'lucide-react'
-import { Conversation as ConversationType, Attachment, Project, CollabProjectFile } from '@/types'
+import { Conversation as ConversationType, Attachment, Project, AgentTaskFile } from '@/types'
 import { ConnectionState } from '@/services/cozmo'
 import type { SectionId } from '@/components/settings/SettingsModal'
 import { MessageBubble } from './MessageBubble'
@@ -30,10 +30,10 @@ interface Props {
   permissionMode?: string
   onSetPermissionMode?: (mode: string) => void
   diffEntries?: DiffEntry[]
-  collabProject?: Project | null
+  agentTask?: Project | null
   onListProjects?: (search?: string) => void
   onSelectProject?: (id: string) => void
-  onCreateProject?: (data: { name: string; description: string; instructions: string; files: CollabProjectFile[]; location: string }) => void
+  onCreateTask?: (data: { name: string; description: string; instructions: string; files: AgentTaskFile[]; location: string }) => void
   onImportChat?: (ids: string[]) => void
 }
 
@@ -64,10 +64,10 @@ export function Conversation({
   permissionMode,
   onSetPermissionMode,
   diffEntries,
-  collabProject,
+  agentTask,
   onListProjects,
   onSelectProject,
-  onCreateProject,
+  onCreateTask,
   onImportChat,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -153,10 +153,10 @@ export function Conversation({
             onSetDirectory={onSetDirectory}
             permissionMode={permissionMode}
             onSetPermissionMode={onSetPermissionMode}
-            collabProject={collabProject}
+            agentTask={agentTask}
             onListProjects={onListProjects}
             onSelectProject={onSelectProject}
-            onCreateProject={onCreateProject}
+            onCreateTask={onCreateTask}
             onImportChat={onImportChat}
           />
         </div>
