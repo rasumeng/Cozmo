@@ -146,7 +146,7 @@ Bundled skills: `skill-creator` (meta-skill for creating new skills).
 
 ```toml
 [models]
-classifier = "hf.co/ewinregirgojr/MiniCPM5-1B-Agentic-Tooluse-GGUF:Q4_K_M"
+classifier = "openbmb/minicpm5:Q4_K_M"
 chat = "qwen3:8b"
 coder = "ornith:9b"
 vision = "qwen2.5vl:7b"

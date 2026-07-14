@@ -9,7 +9,9 @@ CONFIG_PATH = CONFIG_DIR / "config.toml"
 
 DEFAULT_CONFIG = {
     "models": {
-        "classifier": "hf.co/ewinregirgojr/MiniCPM5-1B-Agentic-Tooluse-GGUF:Q4_K_M",
+        "classifier": "openbmb/minicpm5:Q4_K_M",
+        "router": "openbmb/minicpm5:Q4_K_M",
+        "orchestrator": "openbmb/minicpm5:Q4_K_M",
         "chat": "qwen3:8b",
         "agent": "qwen3:8b",
         "coder": "ornith:9b",
