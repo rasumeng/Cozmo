@@ -117,42 +117,217 @@ This is the active development roadmap. Items are grouped by priority phase.
 
 ---
 
-### Phase 4: Subagent System (Medium Priority)
+### Phase 4: Autonomous Agent Core (High Priority)
 
-**Problem:** No subagent/task spawning capability. `.cozmo/agents/` directory exists with `review.md` but isn't wired into runtime.
+Port autonomous agentic features from CozmoBrain into Cozmo. These components exist in the CozmoBrain prototype but are missing or simplified in Cozmo.
 
-**Changes:**
-- `core/runtime.py`: Load custom agents from `.cozmo/agents/*.md` files
-- New tool `task(description, prompt, subagent_type)` that spawns sub-CozmoRuntime instances
-- Subagent types: `@general` (full agent), `@explore` (read-only), `@scout` (external research)
-- `webui_server.py`: Handle subagent events in WebSocket stream
-- Frontend: Show subagent progress in activity panel
+Target architecture:
 
-**Files:** `cozmo/core/runtime.py`, `cozmo/tools/` (new task tool), `cozmo/webui_server.py`
+```
+User Input
+    |
+CozmoRuntime (upgraded)
+    |
+Cognitive Loop
+ ├── Think/Route
+ ├── Plan (structured with Planner)
+ ├── Execute (with Reflector error recovery)
+ ├── Reflect (learn from failures)
+ ├── Update State (persistent AgentState)
+ └── Continue
+    |
+EventBus → UI / logging / monitoring (decoupled)
+```
 
 ---
 
-### Phase 5: Collab Polish + Async Workflow (Low Priority)
+#### 4A. Persistent AgentState + StateStore
+
+Port `CozmoBrain/agent/state.py` → `cozmo/core/agent_state.py`
+
+**Purpose:** Track persistent cognitive state across sessions — goals, status, plan progress, observations, failures, tool history.
+
+**Dataclasses to port:**
+- `AgentStatus` — state enum: IDLE, THINKING, PLANNING, EXECUTING, REFLECTING, WAITING, COMPLETE, ERROR
+- `Observation` — source, content, timestamp
+- `AgentEvent` — event_type, description, data, timestamp
+- `AgentState` — current_goal, status, active_plan, observations, events, tools_used, failures, scratchpad
+- `StateStore` — JSON persistence to `~/.cozmo/agent_state.json`
+
+**Integration:**
+- `CozmoRuntime.__init__()` loads state on startup
+- `run_stream()` tracks state transitions through lifecycle
+- `_remember()` saves state after each turn
+- State summary injected into system prompt for context
+- Config: `agent_state_path` in config.toml
+
+**Files:**
+- NEW `cozmo/core/agent_state.py`
+- EDIT `cozmo/core/runtime.py`
+- EDIT `cozmo/config.py`
+
+---
+
+#### 4B. EventBus
+
+Port `CozmoBrain/agent/events.py` → `cozmo/core/event_bus.py`
+
+**Purpose:** Decouple monitoring, logging, and UI updates from runtime. Everything becomes observable.
+
+**Event types:** goal_started, goal_completed, plan_created, tool_failed, step_completed, reflection_completed, state_changed, error, warning, info
+
+**Integration:**
+- `CozmoRuntime.__init__()` creates EventBus
+- `run_stream()` emits events alongside yield tuples
+- WebSocket server subscribes and forwards to frontend
+- Enables future: background monitoring, autonomous task scheduling, activity feed
+
+**Files:**
+- NEW `cozmo/core/event_bus.py`
+- EDIT `cozmo/core/runtime.py` (emit events)
+- EDIT `cozmo/webui_server.py` (forward events to WebSocket)
+
+---
+
+#### 4C. Planner + TaskQueue + PlanExecutor
+
+Port `CozmoBrain/agent/planner.py` → `cozmo/core/planner.py`
+
+**Purpose:** Replace inline `_generate_plan()` with a structured planner that generates, validates, executes, and replans.
+
+**Components to port:**
+- `Plan` — goal, steps (PlanStep list), context, timestamp, `to_text()`
+- `PlanStep` — id, description, tool, args, depends_on, status (PENDING/READY/RUNNING/DONE/FAILED/SKIPPED)
+- `TaskQueue` — dependency resolution state machine: `get_ready()`, `mark_done()`, `mark_failed()`, `all_done()`
+- `PlanExecutor` — execute steps with retry loop, integrates with Reflector
+- `Planner` — LLM-based plan generation, JSON parsing, validation (tool names exist, no cycles, max steps), `replan()` on failure
+
+**Integration:**
+- Replace `_generate_plan()` with `Planner.create_plan()`
+- Replace `_gather_agent_context()` with `Planner` using tool descriptions
+- Agent mode uses `PlanExecutor.execute_plan()` with step-by-step progress
+- Replan on partial failure in agent mode
+- Plan validation prevents hallucinated tool names
+
+**Files:**
+- NEW `cozmo/core/planner.py`
+- EDIT `cozmo/core/runtime.py` (swap inline plan gen for Planner)
+- EDIT `cozmo/core/llm.py` (add `StatelessLLM` wrapper for one-shot LLM calls)
+
+---
+
+#### 4D. Reflector + LessonStore
+
+Port `CozmoBrain/agent/reflector.py` → `cozmo/core/reflector.py`
+
+**Purpose:** Analyze tool failures, classify errors, recommend recovery strategies, store lessons for future reference. Currently Cozmo has no error learning — errors vanish after the turn.
+
+**Components to port:**
+- `ErrorType` — enum: TIMEOUT, AUTH, NOT_FOUND, PARSE, RATE_LIMIT, VALIDATION, LOGIC, UNKNOWN
+- `RetryStrategy` — enum: RETRY, MODIFY_PARAMS, CHANGE_TOOL, DECOMPOSE, ABORT
+- `ReflectionResult` — success, error_type, retry_strategy, suggestion, modified_args, confidence
+- `LessonStore` — persists failure patterns with match scoring, `format_for_prompt()` surfaces relevant lessons
+- `Reflector` — `before_step()`/`after_step()` hooks, error classification, strategy recommendation, param fixes, optional LLM-powered deep analysis
+
+**Integration:**
+- `PlanExecutor` calls `Reflector.before_step()`/`after_step()` each step
+- On failure, Reflector suggests modified args or alternative approach
+- `LessonStore` persists to `~/.cozmo/lessons.json`
+- Lessons injected into system prompt after repeated failures
+- Config: `reflection.llm_enabled` in config.toml
+
+**Files:**
+- NEW `cozmo/core/reflector.py`
+- EDIT `cozmo/core/planner.py` (PlanExecutor uses Reflector)
+- EDIT `cozmo/config.py` (add `[reflection]` section)
+
+---
+
+#### 4E. Tool Risk Levels
+
+Port `CozmoBrain/agent/tool_registry.py` (RiskLevel + ToolSpec) into Cozmo's tool registry.
+
+**Purpose:** Enable nuanced permission gating — "allow LOW risk, ask for HIGH, deny CRITICAL". Currently Cozmo has flat allow/ask/deny.
+
+**Changes:**
+- Add `RiskLevel` enum to `cozmo/tools/__init__.py` (LOW/MEDIUM/HIGH/CRITICAL)
+- Add `risk_level` field to tool registration (decorator param: `@register_tool(risk="medium")`)
+- Add `category` field for tool classification
+- Permission system uses risk level: e.g. "allow LOW/MEDIUM without asking, ask for HIGH, deny CRITICAL"
+- Add `by_risk(max_risk)` filter for mode-based tool gating
+
+**Files:**
+- EDIT `cozmo/tools/__init__.py` (RiskLevel, decorator upgrade)
+- EDIT existing tool files (add risk/category metadata)
+- EDIT `cozmo/core/permissions.py` (risk-aware resolution)
+- EDIT `cozmo/core/runtime.py` (risk-based tool gate)
+
+---
+
+#### 4F. Agent Router Profiles
+
+Port `CozmoBrain/agent/agent_router.py` → `cozmo/core/agent_router.py`
+
+**Purpose:** Route queries to specialized agent profiles (coder/researcher/writer) with different models, tool sets, and system prompts. Currently Cozmo has mode dispatch (chat/work/research/agent/vision) but no profile-based specialization.
+
+**Components to port:**
+- `AgentProfile` — name, description, model, allowed tool categories, system prompt override, risk max
+- `AgentRouter` — register profiles, route queries via keyword + LLM fallback
+
+**Integration:**
+- Router runs after mode dispatch, selects profile within mode
+- Profile model overrides mode model in ModelManager
+- Profile tool categories filter available tools
+- Config: `[agents.profiles]` in config.toml
+
+**Files:**
+- NEW `cozmo/core/agent_router.py`
+- EDIT `cozmo/core/runtime.py` (profile-aware tool selection)
+- EDIT `cozmo/core/model_manager.py` (model override per profile)
+- EDIT `cozmo/config.py` (profile config section)
+
+---
+
+### Phase 5: Subagent System Polish (Medium Priority)
+
+**Current state:** `.cozmo/agents/` directory exists with `review.md`. `task()` tool implemented with explore/scout/general + custom agent loading from `.md` files. Wiring into runtime is partial.
+
+**Remaining changes:**
+- `core/runtime.py`: Load custom agents from `.cozmo/agents/*.md` directly in runtime (not just task tool)
+- `webui_server.py`: Handle subagent events in WebSocket stream
+- Frontend: Show subagent progress in activity panel
+- Add `builder` (surgical edit) and `reviewer` (diff review) built-in subagent types
+- Structured output contracts for subagents (parseable formats)
+
+**Files:** `cozmo/core/runtime.py`, `cozmo/tools/task.py`, `cozmo/webui_server.py`
+
+---
+
+### Phase 6: Collab Polish + Async Workflow (Low Priority)
 
 **Current state:** Collab mode has plan generation → approval → execution. Projects CRUD exists. Missing: async background tasks, error recovery, progress tracking.
 
 **Changes:**
-- Improve collab mode error recovery and step progress reporting
-- Add background task queue with status persistence
+- Integrate Planner + TaskQueue for structured plan execution in collab mode
+- Add background task queue with status persistence (uses EventBus + AgentState)
 - Add task resume capability after session restart
 - Add guided workflows for common collab tasks
 
-**Files:** `cozmo/core/runtime.py`, `cozmo/webui_server.py`
+**Files:** `cozmo/core/runtime.py`, `cozmo/core/planner.py`, `cozmo/core/event_bus.py`, `cozmo/webui_server.py`
 
 ---
 
-### Phase 6: Diagnostics + Sourcegraph (Low Priority)
+### Phase 7: Diagnostics + Sourcegraph (Low Priority)
 
 **Changes:**
 - Add `diagnostics(path)` tool — stub for LSP error retrieval (can be enhanced later)
 - Add `sourcegraph(query)` tool — search public repos (requires API config)
 
 **Files:** `cozmo/tools/` (new files)
+
+
+
+
 
 ---
 
@@ -171,9 +346,18 @@ PHASE 2 (Core Tools):
   └─ 2D: Add webfetch tool              [web_search.py]
 
 PHASE 3 (Memory):                       [manager.py, chroma_store.py]
-PHASE 4 (Subagents):                    [runtime.py, tools/]
-PHASE 5 (Collab):                       [runtime.py, webui_server.py]
-PHASE 6 (Diagnostics):                  [tools/]
+
+PHASE 4 (Autonomous Agent Core):
+  ├─ 4A: AgentState + StateStore        [agent_state.py NEW, runtime.py, config.py]
+  ├─ 4B: EventBus                       [event_bus.py NEW, runtime.py, webui_server.py]
+  ├─ 4C: Planner + TaskQueue            [planner.py NEW, runtime.py, llm.py]
+  ├─ 4D: Reflector + LessonStore        [reflector.py NEW, planner.py, config.py]
+  ├─ 4E: Tool Risk Levels               [tools/__init__.py, permissions.py, runtime.py]
+  └─ 4F: Agent Router Profiles          [agent_router.py NEW, runtime.py, model_manager.py, config.py]
+
+PHASE 5 (Subagents):                    [runtime.py, tools/task.py, webui_server.py]
+PHASE 6 (Collab):                       [runtime.py, planner.py, event_bus.py, webui_server.py]
+PHASE 7 (Diagnostics):                  [tools/]
 ```
 
 ---
@@ -184,10 +368,16 @@ PHASE 6 (Diagnostics):                  [tools/]
 2. **Projects are lightweight groupings** — a project is a list of conversation IDs + shared context text.
 3. **Skills are SKILL.md files** on disk. The "Skill Creator" skill guides the agent through creating other skills.
 4. **Connectors = MCP servers** on backend. Settings UI manages them.
-5. **No database** — everything is file-based: `~/.cozmo/chats/`, `~/.cozmo/projects/`, `~/.cozmo/skills/`, `~/.cozmo/attachments/`, `~/.cozmo/memory/`.
+5. **No database** — everything is file-based: `~/.cozmo/chats/`, `~/.cozmo/projects/`, `~/.cozmo/skills/`, `~/.cozmo/attachments/`, `~/.cozmo/memory/`, `~/.cozmo/agent_state/`.
 6. **Code mode diffs are session-scoped** — computed from tool args on the backend (`difflib.unified_diff`).
 7. **Terminal is lang-agnostic** — all tool output shows equally.
 8. **Per-mode input bars share a single PromptInput** with conditional rendering by `mode` prop.
+9. **Autonomous agent state is persistent** — `AgentState` saves goals/observations/failures to `agent_state.json`. Survives restarts. Loaded on CozmoRuntime init.
+10. **EventBus decouples monitoring** — runtime emits typed events; WebSocket / TUI / logging subscribe independently. No hardcoded yield tuples for status.
+11. **Planner replaces inline plan gen** — structured plan with dependency resolution, validation, retry, and replanning. TaskQueue manages step state machine.
+12. **Reflector learns from failures** — error classification, recovery strategies, LessonStore persists patterns. LLM-powered root cause analysis optional.
+13. **Tool risk levels replace flat permission gating** — LOW/MEDIUM/HIGH/CRITICAL tiers enable nuanced auto-allow/ask/deny per mode.
+14. **Agent profiles specialize behavior** — AgentRouter routes to coder/researcher/writer profiles with different models, tool sets, and system prompts within the existing mode system.
 
 ---
 
