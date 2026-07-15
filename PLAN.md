@@ -28,13 +28,13 @@ This is the active development roadmap. Items are grouped by priority phase.
 **Problem:** Settings > Memory shows only two read-only config values. No way to browse, search, or view stored memories. No visibility into storage location.
 
 **Changes:**
-- Backend: Add `GET /api/memory/search?q=...` and `DELETE /api/memory/{id}` endpoints to `webui_server.py`
-- Backend: Add `list_all()` and `delete(id)` methods to `memory/chroma_store.py`
-- Frontend: Add "Memory Browser" panel in Settings > Memory with search box, results list (timestamp, text preview, distance), delete button per entry
+- Backend: Add `GET /api/memory/search?q=...&type=...` and `DELETE /api/memory/{id}` endpoints to `webui_server.py`
+- Backend: Add `list_all(limit)`, `delete(id)`, and `query(text, k, memory_types)` methods to `memory/manager.py` (backed by LanceDB)
+- Frontend: Add "Memory Browser" panel in Settings > Memory with search box, type filter, results list (timestamp, type tag, text preview, score), delete button per entry
 - Frontend: Add "Open memory folder" button that reveals `~/.cozmo/memory/`
-- Frontend: Add info panel explaining what memory does and where data lives
+- Frontend: Add info panel explaining memory philosophy (LLM reasons, doesn't search)
 
-**Files:** `cozmo/webui_server.py`, `cozmo/memory/chroma_store.py`, `cozmo/memory/manager.py`, `cozmo/webui/src/components/settings/SettingsModal.tsx`
+**Files:** `cozmo/webui_server.py`, `cozmo/memory/manager.py`, `cozmo/webui/src/components/settings/SettingsModal.tsx`
 
 #### 1C. Prompt Generalization
 
@@ -101,19 +101,153 @@ This is the active development roadmap. Items are grouped by priority phase.
 
 ---
 
-### Phase 3: Memory OKF + RAG Enhancement (Medium Priority)
+### Phase 3: Memory Engine — LanceDB + OKF Pipeline (Medium Priority)
 
-**Current state:** ChromaDB + Ollama embeddings work. OKF frontmatter only on knowledge base writes, not conversation memories. No hybrid search. No memory types.
+**Pivot:** Replace ChromaDB with LanceDB as the primary vector store. Adopt the philosophy that *the LLM should reason, not search* — memory retrieval happens before the prompt reaches the model.
+
+**Target architecture:**
+
+```
+User Input
+    │
+    ▼
+Memory Manager
+    │
+    ▼
+Conversation → OKF Classification → Sentence Transformer Embedding → LanceDB
+                                                                        │
+                                     ┌──────────────────────────────────┤
+                                     ▼          ▼          ▼           ▼
+                                 Semantic   Metadata   Hybrid    Structured
+                                 Vector     Filter     Keyword   Queries
+                                 Search                          (SQL)
+                                     │          │          │           │
+                                     ▼          ▼          ▼           ▼
+                                 Ranking (importance + recency + relevance + type)
+                                     │
+                                     ▼
+                              Context Injection
+                                     │
+                                     ▼
+                               Ollama LLM
+```
+
+**Why LanceDB:**
+- Local-first, disk-backed, low RAM — scales as long-term memory grows
+- Native hybrid search (vector + keyword FTS) without manual scoring hacks
+- Structured metadata queries via SQL-like expressions (better than ChromaDB's metadata filters)
+- Single dependency (`lancedb`) vs ChromaDB's client/server overhead
+- Format aligns with Cozmo's philosophy: file-based, no daemon needed
 
 **Changes:**
-- `memory/manager.py`: Add OKF metadata (type, title, tags) to conversation summaries stored in ChromaDB
-- `memory/chroma_store.py`: Add hybrid search (combine ChromaDB similarity with keyword matching)
-- `memory/manager.py`: Add memory types — separate metadata tags for conversation summaries, user preferences, project context, learned facts
-- `memory/manager.py`: Add importance scoring (recency + relevance + frequency)
-- `memory/manager.py`: Add consolidation — periodically merge similar/duplicate memories
-- `memory/manager.py`: Add user preference detection and storage
 
-**Files:** `cozmo/memory/manager.py`, `cozmo/memory/chroma_store.py`, `cozmo/core/runtime.py`
+#### 3A. Rewrite Vector Store: ChromaStore → LanceStore
+
+Replace `cozmo/memory/chroma_store.py` with `cozmo/memory/lancedb_store.py`
+
+- `LanceStore(uri, table_name, embed_dim=384)` — LanceDB table wrapper
+- `add(text, metadata, embedding)` — insert with pre-computed embedding
+- `add_texts(texts, metadatas)` — auto-embed via SentenceTransformer
+- `similarity_search(query, k, filters)` — vector search with optional metadata predicates
+- `hybrid_search(query, k, filters)` — combine vector + FTS score (native LanceDB FTS)
+- `query(sql: str)` — raw SQL for structured queries (e.g. `WHERE type = 'preference'`)
+- `count()`, `list_all(limit)`, `delete(id)`, `update(id, metadata)`
+
+**Files:**
+- NEW `cozmo/memory/lancedb_store.py`
+- DELETE `cozmo/memory/chroma_store.py`
+
+#### 3B. Upgrade Memory Manager
+
+Rewrite `cozmo/memory/manager.py`:
+
+- Replace `ChromaStore` with `LanceStore`
+- Add OKF classification pipeline for extracted memories
+- Memory types: `conversation`, `preference`, `project`, `fact`, `learning`, `reference`
+- Importance scoring: `score = vec_sim × 0.5 + recency × 0.2 + importance × 0.2 + type_weight × 0.1`
+- Background consolidation: merge/delete duplicates, decay low-importance memories
+- `query(text, k, memory_types=None, min_score=0.3)` — pass type filters down to LanceDB
+
+**Files:**
+- REWRITE `cozmo/memory/manager.py`
+
+#### 3C. Sentence Transformers as Embedding Provider
+
+Replace `OllamaEmbeddings` with Sentence Transformers (`all-MiniLM-L6-v2`, 384d):
+
+- Lighter than Ollama embedding models (no separate model load in Ollama)
+- CPU-friendly, 384-dim vectors keep LanceDB index small
+- Pre-loaded once at startup, reused across memory + project index
+
+**Changes:**
+- `memory/lancedb_store.py`: Accept `sentence_transformers.SentenceTransformer` instance
+- `memory/manager.py`: Load model in constructor, pass to LanceStore
+- `code_indexer.py`: Use same SentenceTransformer for project indexing
+
+**Files:**
+- EDIT `cozmo/memory/lancedb_store.py`
+- EDIT `cozmo/memory/manager.py`
+- EDIT `cozmo/code_indexer.py`
+- EDIT `cozmo/webui_server.py`
+- EDIT `cozmo/cli.py`
+- EDIT `cozmo/config.py` (add `memory.embed_model` default)
+
+#### 3D. OKF Memory Extraction
+
+Auto-classify conversation summaries into OKF-typed memories:
+
+- Agent writes `write_knowledge()` → OKF frontmatter (already works)
+- Memory pipeline extracts conversation → classifies type → stores with OKF metadata
+- OKF metadata: `type`, `title`, `tags`, `timestamp`, `importance`, `source`
+- Index files auto-updated per OKF spec
+
+**Files:**
+- EDIT `cozmo/memory/manager.py`
+
+#### 3E. Hybrid Search + Ranking
+
+LanceDB-native hybrid search replaces ChromaDB's manual keyword-boost hack:
+
+- Vector search (cosine/L2) for semantic similarity
+- Full-text search (LanceDB's built-in FTS) for keyword matching
+- Combined score: normalized vector score + normalized FTS score, weighted by config
+- Results ranked by combined score × recency × importance × type weight
+
+**Files:**
+- EDIT `cozmo/memory/lancedb_store.py`
+
+#### 3F. Memory UI (LanceDB-compatible)
+
+Update Phase 1B Memory UI to use LanceStore API:
+
+- `GET /api/memory/search?q=...&type=...&limit=...` — filters by type, returns ranked results
+- `DELETE /api/memory/{id}` — delete from LanceDB table
+- Frontend unchanged (API contract same)
+
+**Files:**
+- EDIT `cozmo/webui_server.py` (memory API endpoints)
+
+---
+
+### Migration Path: ChromaDB → LanceDB
+
+Existing ChromaDB data at `~/.cozmo/memory/` must be migrated once:
+
+1. Read all entries from ChromaDB via `list_all()`
+2. Re-embed using SentenceTransformer
+3. Write to LanceDB table at `~/.cozmo/memory/`
+4. Keep ChromaDB fallback for one release cycle, then remove
+
+**Script:** `cozmo/scripts/migrate_memory.py`
+
+**Config toml update:**
+```toml
+[memory]
+embed_model = "all-MiniLM-L6-v2"
+max_turns_before_summary = 5
+max_short_term_pairs = 10
+table_name = "cozmo_memories"
+```
 
 ---
 
@@ -345,7 +479,13 @@ PHASE 2 (Core Tools):
   ├─ 2C: Upgrade read with offset/limit [file_ops.py]
   └─ 2D: Add webfetch tool              [web_search.py]
 
-PHASE 3 (Memory):                       [manager.py, chroma_store.py]
+PHASE 3 (Memory Engine — LanceDB):
+  ├─ 3A: LanceDB store                  [lancedb_store.py NEW, chroma_store.py DELETE]
+  ├─ 3B: Memory manager rewrite         [manager.py REWRITE]
+  ├─ 3C: Sentence Transformer embedder  [lancedb_store.py, manager.py, code_indexer.py, webui_server.py, cli.py]
+  ├─ 3D: OKF extraction pipeline        [manager.py]
+  ├─ 3E: Hybrid search + ranking        [lancedb_store.py]
+  └─ 3F: Memory UI (LanceDB-compat)     [webui_server.py]
 
 PHASE 4 (Autonomous Agent Core):
   ├─ 4A: AgentState + StateStore        [agent_state.py NEW, runtime.py, config.py]
@@ -368,7 +508,7 @@ PHASE 7 (Diagnostics):                  [tools/]
 2. **Projects are lightweight groupings** — a project is a list of conversation IDs + shared context text.
 3. **Skills are SKILL.md files** on disk. The "Skill Creator" skill guides the agent through creating other skills.
 4. **Connectors = MCP servers** on backend. Settings UI manages them.
-5. **No database** — everything is file-based: `~/.cozmo/chats/`, `~/.cozmo/projects/`, `~/.cozmo/skills/`, `~/.cozmo/attachments/`, `~/.cozmo/memory/`, `~/.cozmo/agent_state/`.
+5. **No database** — everything is file-based: `~/.cozmo/chats/`, `~/.cozmo/projects/`, `~/.cozmo/skills/`, `~/.cozmo/attachments/`, `~/.cozmo/memory/` (LanceDB), `~/.cozmo/agent_state/`.
 6. **Code mode diffs are session-scoped** — computed from tool args on the backend (`difflib.unified_diff`).
 7. **Terminal is lang-agnostic** — all tool output shows equally.
 8. **Per-mode input bars share a single PromptInput** with conditional rendering by `mode` prop.
@@ -378,6 +518,9 @@ PHASE 7 (Diagnostics):                  [tools/]
 12. **Reflector learns from failures** — error classification, recovery strategies, LessonStore persists patterns. LLM-powered root cause analysis optional.
 13. **Tool risk levels replace flat permission gating** — LOW/MEDIUM/HIGH/CRITICAL tiers enable nuanced auto-allow/ask/deny per mode.
 14. **Agent profiles specialize behavior** — AgentRouter routes to coder/researcher/writer profiles with different models, tool sets, and system prompts within the existing mode system.
+15. **LLM reasons, memory engine searches** — Memory retrieval is a pre-pipeline, not a runtime call. Sentence Transformers embed + LanceDB ranks before the prompt reaches Ollama. The LLM never sees raw memory queries; it only sees curated context from the ranked results.
+16. **OKF-classified memories, not raw conversation dumps** — Every stored memory has a type (conversation/preference/project/fact/learning/reference), title, tags, importance score, and source. Index files enable progressive disclosure — the LLM browses indexes before loading full entries.
+17. **LanceDB over ChromaDB** — Local-first, disk-backed, no daemon. Native hybrid search (vector + FTS) without manual scoring hacks. SQL metadata queries for structured filtering. Aligns with Cozmo's file-based, zero-infrastructure philosophy.
 
 ---
 
@@ -441,5 +584,5 @@ From what I can see, SettingsModal.tsx is feature-rich but trying to do too much
 That alone would massively improve maintainability.
 2. Skills lack parity with Connectors—there's no search, categories, metadata, or marketplace.
 3. The roadmap never actually includes a Skill Marketplace, so your inability to find one is expected; it hasn't been designed or implemented.
-4. Memory UI depends on backend APIs that must exist for it to work.
+4. Memory UI depends on LanceDB-backed backend APIs — must exist for it to work. Plan: implement Phase 3 LanceStore + Manager first, then wire Memory UI.
 5. The Connector experience feels like a polished "app store," while the Skills experience still feels like a simple CRUD file manager.
