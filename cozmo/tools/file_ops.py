@@ -3,6 +3,8 @@ from pathlib import Path
 
 import yaml
 
+from ..memory.knowledge_index import get_knowledge_index
+
 from . import register_tool
 
 # Restrict reads to project root or subdirs
@@ -148,6 +150,31 @@ def read_knowledge(path: str) -> str:
 
 
 @register_tool()
+def search_knowledge(query: str, k: int = 5) -> str:
+    """Semantic search across the knowledge base. Returns ranked results with titles and excerpts.
+
+    Args:
+        query: Natural language search query.
+        k: Number of results to return (max 20).
+    """
+    ki = get_knowledge_index()
+    if ki is None:
+        return "[error] Knowledge index not initialized. Start a chat session first."
+    results = ki.search(query, k=min(k, 20))
+    if not results:
+        return "[info] No matching knowledge found."
+    lines = []
+    for r in results:
+        meta = r.get("metadata", {})
+        path = meta.get("path", "?")
+        title = meta.get("title", path)
+        score = r.get("score", 0.0)
+        text = r.get("text", "")[:300].replace("\n", " ")
+        lines.append(f"- **{title}** ({path}, score={score:.2f}): {text}")
+    return "\n".join(lines)
+
+
+@register_tool()
 def write_knowledge(path: str, content: str, type: str = "Reference", title: str = "", tags: list[str] | None = None) -> str:
     """Write a file to the knowledge base with OKF frontmatter.
 
@@ -182,6 +209,10 @@ def write_knowledge(path: str, content: str, type: str = "Reference", title: str
             f.write("---\n\n")
             f.write(content)
 
+        from ..memory.knowledge_index import get_knowledge_index
+        ki = get_knowledge_index()
+        if ki is not None:
+            ki.index_file(target)
         return f"[ok] Written to knowledge/{path}"
     except Exception as e:
         return f"[error] {e}"

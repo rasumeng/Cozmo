@@ -1,6 +1,33 @@
-from datetime import datetime
-from .chroma_store import ChromaStore
+"""
+MemoryManager — persistent memory with OKF classification and importance scoring.
 
+Replaces ChromaDB with LanceDB + Sentence Transformers.
+
+Architecture:
+  Conversation → LLM Summary → OKF Classifier → SentenceTransformer → LanceDB
+                                                                         │
+                                   ┌─────────────────────────────────────┤
+                                   ▼          ▼          ▼              ▼
+                               Semantic   Metadata   Hybrid       Structured
+                               Vector     Filter     Keyword      Queries
+                                   │          │          │              │
+                                   ▼          ▼          ▼              ▼
+                               Ranking (importance × recency × frequency)
+                                   │
+                                   ▼
+                            Context injection into prompt
+"""
+
+import logging
+from datetime import datetime
+from pathlib import Path
+from typing import Optional
+
+from sentence_transformers import SentenceTransformer
+
+from .lancedb_store import LanceStore
+
+log = logging.getLogger("cozmo.memory.manager")
 
 SUMMARIZE_PROMPT = """Condense the following conversation into 2-3 sentences.
 Capture key facts, user preferences, and any actionable items.
@@ -16,18 +43,38 @@ MEMORY_TYPES = {
     "preference": "User preferences and settings",
     "project": "Project context and file structure",
     "fact": "Learned facts and references",
+    "learning": "Skills and knowledge acquired",
+    "reference": "Reference material and documentation",
 }
-
-SIMILARITY_THRESHOLD = 0.85  # Above this cosine similarity = duplicate
 
 
 class MemoryManager:
-    def __init__(self, llm, persist_dir: str):
+    """Persistent memory with hybrid search, OKF classification, and importance scoring."""
+
+    def __init__(
+        self,
+        llm,
+        persist_dir: str,
+        embed_model: str = "all-MiniLM-L6-v2",
+        max_turns: int = 5,
+    ):
         self.llm = llm
-        self.chroma = ChromaStore("cozmo_memories", persist_dir)
-        self.short_term = []
-        self.max_turns = 5
+        self.short_term: list[dict] = []
+        self.max_turns = max_turns
         self.turn_count = 0
+
+        self._embedder = SentenceTransformer(embed_model)
+        embed_dim = self._embedder.get_sentence_embedding_dimension() or 384
+
+        def embed(text: str) -> list[float]:
+            return self._embedder.encode(text, normalize_embeddings=True).tolist()
+
+        self.store = LanceStore(
+            uri=Path(persist_dir) / "lancedb",
+            table_name="cozmo_memories",
+            embed_func=embed,
+            embed_dim=embed_dim,
+        )
 
     def add_interaction(self, user: str, assistant: str):
         self.short_term.append({"user": user, "assistant": assistant})
@@ -42,60 +89,94 @@ class MemoryManager:
         )
         summary = self.llm.invoke(SUMMARIZE_PROMPT.format(text=text))
 
+        memory_type = self._classify(summary)
+
         meta = {
             "timestamp": datetime.now().isoformat(),
             "turns": self.turn_count,
-            "type": "conversation",
+            "type": memory_type,
             "frequency": 1,
+            "title": summary.split(".")[0][:80],
         }
-        self.chroma.add_texts([summary], [meta])
+        self.store.add_texts([summary], [meta])
         self.short_term = self.short_term[-1:]
         self.turn_count = 0
 
+    def _classify(self, text: str) -> str:
+        """OKF-style classification: determine memory type from content."""
+        t = text.lower()
+        if any(w in t for w in ("prefer", "like", "dislike", "favorite", "love", "hate")):
+            return "preference"
+        if any(w in t for w in ("project", "repository", "codebase", "file", "directory")):
+            return "project"
+        if any(w in t for w in ("learn", "understand", "know", "concept", "how to")):
+            return "learning"
+        if any(w in t for w in ("reference", "document", "guide", "manual", "spec")):
+            return "reference"
+        if any(w in t for w in ("fact", "remember", "important", "note")):
+            return "fact"
+        return "conversation"
+
     def store_preference(self, key: str, value: str):
-        """Store a user preference as a memory."""
         text = f"User preference: {key} = {value}"
         meta = {
             "timestamp": datetime.now().isoformat(),
             "type": "preference",
             "key": key,
             "frequency": 1,
+            "title": f"preference: {key}",
         }
-        self.chroma.add_texts([text], [meta])
+        self.store.add_texts([text], [meta])
 
     def store_project_context(self, context: str):
-        """Store project context as a memory."""
         meta = {
             "timestamp": datetime.now().isoformat(),
             "type": "project",
             "frequency": 1,
         }
-        self.chroma.add_texts([context], [meta])
+        self.store.add_texts([context], [meta])
 
-    def store_fact(self, fact: str, tags: list[str] | None = None):
-        """Store a learned fact."""
+    def store_fact(self, fact: str, tags: Optional[list[str]] = None):
+        title = fact.split(".")[0][:80]
         meta = {
             "timestamp": datetime.now().isoformat(),
             "type": "fact",
             "tags": tags or [],
             "frequency": 1,
+            "title": title,
         }
-        self.chroma.add_texts([fact], [meta])
+        self.store.add_texts([fact], [meta])
 
-    def query(self, text: str, k: int = 5, distance_threshold: float | None = 0.5) -> list[dict]:
-        """Query memory using importance-weighted hybrid search."""
-        results = self.chroma.search_with_importance(
-            text, k=k, distance_threshold=distance_threshold
-        )
-        # Increment frequency for accessed memories
+    def query(
+        self,
+        text: str,
+        k: int = 5,
+        distance_threshold: Optional[float] = 0.5,
+        memory_types: Optional[list[str]] = None,
+    ) -> list[dict]:
+        """Query memory using importance-weighted hybrid search.
+
+        Args:
+            text: Query text
+            k: Max results
+            distance_threshold: Max cosine distance (lower = stricter)
+            memory_types: Filter by type(s), e.g. ["preference", "fact"]
+        """
+        if memory_types:
+            type_filter = " OR ".join(f"metadata LIKE '%\"type\": \"{t}\"%'" for t in memory_types)
+            results = self.store.hybrid_search(text, k=k * 2, distance_threshold=distance_threshold)
+            results = [r for r in results if r.get("metadata", {}).get("type") in memory_types]
+        else:
+            results = self.store.search_with_importance(text, k=k, distance_threshold=distance_threshold)
+
         for item in results:
             if "id" in item:
-                self.chroma.increment_frequency(item["id"])
-        return results
+                self.store.increment_frequency(item["id"])
+        return results[:k]
 
     def consolidate(self) -> int:
         """Find and merge similar/duplicate memories. Returns count of merges."""
-        all_memories = self.chroma.list_all(limit=500)
+        all_memories = self.store.list_all(limit=500)
         if len(all_memories) < 2:
             return 0
 
@@ -108,12 +189,10 @@ class MemoryManager:
                 mem_b = all_memories[j]
                 if mem_b["id"] in seen:
                     continue
-                # Quick text overlap check before expensive embedding comparison
                 words_a = set(mem_a["text"].lower().split())
                 words_b = set(mem_b["text"].lower().split())
                 overlap = len(words_a & words_b) / max(len(words_a | words_b), 1)
                 if overlap > 0.7:
-                    # Mark newer one to keep, delete older
                     freq_a = mem_a.get("metadata", {}).get("frequency", 1)
                     freq_b = mem_b.get("metadata", {}).get("frequency", 1)
                     if freq_a >= freq_b:
@@ -122,9 +201,20 @@ class MemoryManager:
                         seen.add(mem_a["id"])
                         break
 
-        # Delete duplicates
         for id_ in seen:
-            self.chroma.delete(id_)
+            self.store.delete(id_)
             merged += 1
 
         return merged
+
+    def list_all(self, limit: int = 100) -> list[dict]:
+        return self.store.list_all(limit=limit)
+
+    def count(self) -> int:
+        return self.store.count()
+
+    def delete(self, id_: str) -> bool:
+        return self.store.delete(id_)
+
+    def query_sql(self, sql: str) -> list[dict]:
+        return self.store.query_sql(sql)

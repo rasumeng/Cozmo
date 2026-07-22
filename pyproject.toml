@@ -26,7 +26,9 @@ classifiers = [
 dependencies = [
     "langchain-ollama",
     "langchain-core",
-    "chromadb",
+    "langchain-openai",
+    "lancedb",
+    "sentence-transformers",
     "tomli-w",
     "pyperclip",
     "Pillow",

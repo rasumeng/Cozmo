@@ -39,6 +39,43 @@ log = logging.getLogger("cozmo.runtime")
 ATTACHMENTS_DIR = Path.home() / ".cozmo" / "attachments"
 SKILLS_DIR = Path.home() / ".cozmo" / "skills"
 
+_TOOL_CATEGORIES: dict[str, str] = {
+    "read": "workspace",
+    "read_file": "workspace",
+    "write_file": "workspace",
+    "edit_file": "workspace",
+    "glob": "workspace",
+    "glob_search": "workspace",
+    "grep": "workspace",
+    "grep_search": "workspace",
+    "list_directory": "workspace",
+    "diagnostics": "workspace",
+    "sourcegraph": "workspace",
+    "bash": "python",
+    "run_command": "python",
+    "execute_python": "python",
+    "calculator": "python",
+    "web_search": "web",
+    "web_search_pipeline": "web",
+    "search_web": "web",
+    "web_fetch": "web",
+    "fetch_url": "web",
+    "webfetch": "web",
+    "git_diff": "git",
+    "git_log": "git",
+    "read_knowledge": "memory",
+    "search_knowledge": "memory",
+    "write_knowledge": "memory",
+    "schedule_task": "memory",
+    "list_schedules": "memory",
+    "remove_schedule": "memory",
+    "screenshot": "workspace",
+    "analyze_image": "workspace",
+    "clipboard_read": "workspace",
+    "telegram_send": "other",
+    "task": "other",
+}
+
 
 # ── Skill loading ─────────────────────────────────────────────────────────────
 
@@ -97,8 +134,23 @@ def _load_all_skills() -> dict[str, dict]:
 from .llm import OllamaModel
 from .model_manager import ModelManager
 from .permissions import PermissionResolver
+from .tool_risk import ToolRisk, get_tool_risk, risk_to_label
+from .router import route
 from .tool_registry import ToolRegistry
+from .agent.profile import ProfileRouter
 from ..tools import TOOL_REGISTRY
+
+try:
+    from .agent.event_bus import EventBus, EventType
+except ImportError:
+    EventBus = None
+
+try:
+    from .agent.reflector import Reflector, LessonStore
+except ImportError:
+    Reflector = None
+    LessonStore = None
+    EventType = None
 
 
 # ── Prompts ──────────────────────────────────────────────────────────────────
@@ -126,8 +178,11 @@ _MODE_DISCIPLINE = {
     "chat": (
         "MODE: CHAT\n"
         "- Answer conversationally and concisely from your knowledge.\n"
-        "- If the question actually needs current data or file access, say what "
-        "you'd need instead of guessing."
+        "- You have access to read-only tools: knowledge search, calculator, memory recall.\n"
+        "- Use search_knowledge when the answer needs information you're unsure about.\n"
+        "- Use calculator for math. Use search_memory to recall past conversations.\n"
+        "- You CANNOT write files, run commands, or access the web.\n"
+        "- If you truly cannot answer from available tools, say so clearly."
     ),
     "work": (
         "MODE: WORK — you are operating on a real codebase.\n"
@@ -166,47 +221,6 @@ _MODE_DISCIPLINE = {
     ),
 }
 
-_ROUTE_PROMPT = """Classify the user's latest request as exactly one word:
-- chat: greetings, small talk, definitions, general Q&A answerable from timeless knowledge
-- work: coding, editing files, debugging, shell commands, anything touching the project
-- agent: autonomous multi-step tasks like writing specs, planning architecture, documenting, brainstorming, researching, creating reports or proposals
-- research: needs current/external info (news, events, sports, prices, weather, releases, schedules, "today", "latest", "recent", "next", "upcoming")
-- vision: image generation, image editing, processing .png/.jpeg/.bmp/.gif/.tiff/.webp
-
-Anything about current events or things that change over time is research, even if phrased vaguely.
-When unsure between chat and research, pick research. When it touches code or files, pick work.
-Multi-step tasks that need planning (writing docs, creating specs, architecture design, research reports) → agent.
-
-Examples:
-- "what's the weather in new york" → research
-- "latest stock price of apple" → research
-- "who won the super bowl" → research
-- "edit main.py and fix the bug" → work
-- "what is a monad" → chat
-- "help me brainstorm feature ideas" → agent
-- "write a spec for the auth system" → agent
-- "plan the architecture for a new feature" → agent
-- "draft documentation for the API" → agent
-- "summarize this article about AI" → research
-- "create a presentation outline" → agent
-- "fix the typo in README.md" → work
-- "explain how DNS works" → chat
-- "research competitors in the AI space" → agent
-
-Recent conversation (for context on vague follow-ups):
-{history}
-
-Request: {text}
-Answer with one word:"""
-
-# Pre-pass keywords that short-circuit to research mode before LLM call.
-# Catches patterns the small router model might miss.
-_RESEARCH_KEYWORDS = [
-    "latest news", "current events", "what's new",
-    "weather", "price of", "release date", "upcoming", "schedule",
-    "this week", "this month", "today", "right now",
-    "who won", "score", "election", "breaking",
-]
 
 _COLLAB_PLAN_PROMPT = """You are planning a multi-step task. Review the context and generate a clear, numbered plan.
 
@@ -255,6 +269,8 @@ class CozmoRuntime:
         cfg: dict | None = None,
         router_llm: OllamaModel | None = None,
         skills: dict | None = None,
+        event_bus=None,
+        reflector=None,
     ):
         self.model_manager = model_manager
         self.router_llm = router_llm
@@ -262,6 +278,8 @@ class CozmoRuntime:
         self._registry = registry or ToolRegistry()
         self.project_index = project_index
         self.cfg = cfg or {}
+        self.event_bus = event_bus
+        self.reflector = reflector or (Reflector() if Reflector else None)
         self.history: list[tuple[str, str]] = []
         self._summary: str = ""  # compacted old history
 
@@ -305,6 +323,8 @@ class CozmoRuntime:
         ) if self._skills else "(none installed)"
         self.stop_event: threading.Event | None = None
         self._agent_system_extra: str = ""
+        self._profile_router: ProfileRouter | None = None
+        self._active_profile: object | None = None
 
     def _check_stop(self):
         """Stop the generator early if stop_event was set."""
@@ -326,11 +346,17 @@ class CozmoRuntime:
         """Wrap registry functions as StructuredTools (schema from signatures)."""
         return self._registry.as_lc_tools()
 
-    def _tools_for_mode(self, mode: str) -> list:
+    def _tools_for_mode(self, mode: str, profile=None) -> list:
         allowed = self._tool_gate.get(mode, None)
         if allowed is None:
-            return list(self._lc_tools.values())
-        return [self._lc_tools[n] for n in allowed if n in self._lc_tools]
+            tools = list(self._lc_tools.values())
+        else:
+            tools = [self._lc_tools[n] for n in allowed if n in self._lc_tools]
+
+        if profile and hasattr(profile, 'tool_whitelist') and profile.tool_whitelist:
+            whitelist = set(profile.tool_whitelist)
+            tools = [t for t in tools if t.name in whitelist]
+        return tools
 
     # ── context ──────────────────────────────────────────────────────────
 
@@ -368,9 +394,13 @@ class CozmoRuntime:
     def _system_prompt(self, user_input: str, mode: str,
                        grounding: str = "",
                        attachments: list[dict] | None = None,
-                       activated_skills: list[dict] | None = None) -> str:
+                       activated_skills: list[dict] | None = None,
+                       profile=None) -> str:
         parts = [_IDENTITY.format(date=datetime.now().strftime("%A, %B %d, %Y"))]
         parts.append(_MODE_DISCIPLINE.get(mode, _MODE_DISCIPLINE["chat"]))
+
+        if profile and hasattr(profile, 'system_prompt_extra') and profile.system_prompt_extra:
+            parts.append(f"PROFILE INSTRUCTIONS:\n{profile.system_prompt_extra}")
 
         if self._agent_system_extra:
             parts.append(f"AGENT INSTRUCTIONS:\n{self._agent_system_extra}")
@@ -461,28 +491,6 @@ class CozmoRuntime:
             if sk and sk not in already and sk not in found:
                 found.append(sk)
         return found
-
-    # ── routing ──────────────────────────────────────────────────────────
-
-    def _route(self, user_input: str) -> str:
-        query_lower = user_input.lower()
-        for kw in _RESEARCH_KEYWORDS:
-            if kw in query_lower:
-                return "research"
-        recent = "\n".join(
-            f"User: {u}\nCozmo: {a[:200]}" for u, a in self.history[-3:]
-        ) or "(none)"
-        raw = self.router_llm.invoke(
-            _ROUTE_PROMPT.format(history=recent, text=user_input)
-        ).strip().lower()
-        for mode in ("agent", "work", "research", "chat"):
-            if mode in raw:
-                return mode
-        # Unparseable classifier output: chat is the cheap, safe default.
-        # Research mode forces a blocking search; chat mode can still
-        # tell the user what it needs.
-        log.warning("router returned unrecognized mode %r; defaulting to chat", raw)
-        return "chat"
 
     # ── forced grounding search (research mode) ──────────────────────────
 
@@ -587,20 +595,23 @@ class CozmoRuntime:
         # Accept edits: auto-allow file changes, ask for other tools
         if mode == 'accept-edits' and name in ('edit_file', 'write_file'):
             return True
-        # Auto: auto-allow safe tools, ask for risky ones
+        # Auto: auto-allow LOW risk, ask for MEDIUM+, deny CRITICAL
         if mode == 'auto':
-            safe = {'read_file', 'list_directory', 'grep_search', 'calculator',
-                    'git_diff', 'git_log', 'web_search', 'web_search_pipeline',
-                    'web_fetch', 'fetch_url'}
-            if name in safe:
+            risk = get_tool_risk(name)
+            if risk == ToolRisk.LOW:
                 return True
-        # Manual (default) + fallback: config rules then UI callback
+            if risk == ToolRisk.CRITICAL:
+                return False
+        # Fallback: config rules (resolve uses risk internally)
         decision = self._perms.resolve(name, args, agent="cozmo")
         if decision == "allow":
             return True
         if decision == "deny":
             return False
         # 'ask' — defer to the UI layer; no UI hook means deny (fail safe)
+        risk = get_tool_risk(name)
+        if risk == ToolRisk.CRITICAL:
+            return False
         if self._permission_callback:
             return self._permission_callback(name, args)
         return False
@@ -645,6 +656,10 @@ class CozmoRuntime:
                     + text[-tail:])
         return text
 
+    @staticmethod
+    def _tool_category(name: str) -> str:
+        return _TOOL_CATEGORIES.get(name, "other")
+
     # ── main streaming loop ──────────────────────────────────────────────
 
     def _build_multimodal_content(self, text: str, attachments: list[dict]) -> list:
@@ -664,8 +679,22 @@ class CozmoRuntime:
                 content.append({"type": "text", "text": f"[Image: {att['name']} — failed to load]"})
         return content
 
-    def run_stream(self, user_input: str, attachments: list[dict] | None = None, force_mode: str | None = None):
-        """Yield (kind, text) tuples. kind is 'token', 'thinking', or 'status'."""
+    def _emit_bus(self, event_type: str, **data):
+        """Emit to event bus if one is attached."""
+        if self.event_bus:
+            try:
+                self.event_bus.emit(event_type, **data)
+            except Exception:
+                pass
+
+    def run_stream(self, user_input: str, attachments: list[dict] | None = None,
+                   force_mode: str | None = None, agent_runtime=None):
+        """Yield (kind, text) tuples. kind is 'token', 'thinking', or 'status'.
+
+        If agent_runtime is provided (AgentRuntime), agent mode uses its
+        persistent AgentState and structured Planner instead of inline logic.
+        """
+        mode = "chat"  # default for exception handler
         try:
             has_images = attachments and any(a.get("type") == "image" for a in attachments)
 
@@ -673,39 +702,73 @@ class CozmoRuntime:
             activated_skills: list[dict] = self._scan_skills(user_input, [])
 
             yield ("status", "Routing...")
-            mode = (force_mode or self._route(user_input)) if not has_images else "vision"
+            mode = force_mode or route(user_input, self.router_llm, self.history, has_images)
             if activated_skills:
                 names = ", ".join(s["name"] for s in activated_skills)
                 yield ("thinking", f"Mode: {mode} — Skills: {names}", f"Operating in {mode} mode with skills: {names}", None)
             else:
                 yield ("thinking", f"Mode: {mode}", f"Operating in {mode} mode", None)
+            self._emit_bus("mode_set", mode=mode)
 
             grounding = ""
             if mode == "research":
                 yield ("thinking", "Searching...", "Searching the web for context", user_input)
                 grounding = self._grounding_search(user_input)
             elif mode == "agent":
-                yield ("agent_status", "planning", user_input, None)
-                yield ("thinking", "Planning...", "Generating a plan for review", user_input)
-                context = self._gather_agent_context(user_input)
-                plan = self._generate_plan(user_input, context)
-                yield ("plan", plan, "Review and approve the proposed plan", None)
+                if agent_runtime:
+                    agent_runtime.set_goal(user_input)
+                    context = self._gather_agent_context(user_input)
+                    plan = agent_runtime.generate_plan(context)
+                    plan_text = plan.to_text()
+                    agent_runtime.state_store.save(agent_runtime.state)
+                    self._emit_bus("plan_created", goal=user_input, plan=plan_text)
+                else:
+                    yield ("agent_status", "planning", user_input, None)
+                    yield ("thinking", "Planning...", "Generating a plan for review", user_input)
+                    context = self._gather_agent_context(user_input)
+                    plan = self._generate_plan(user_input, context)
+                    plan_text = plan
+
+                plan_steps = None
+                if agent_runtime and agent_runtime.state.active_plan:
+                    plan_steps = [
+                        {"id": s.id, "description": s.description, "tool": s.tool,
+                         "depends_on": s.depends_on, "status": s.status}
+                        for s in agent_runtime.state.active_plan.steps
+                    ]
+                yield ("plan", plan_text, "Review and approve the proposed plan", None, plan_steps)
                 yield ("agent_status", "waiting", user_input, "Awaiting plan approval")
                 approved = True
                 if self._plan_callback:
-                    approved = self._plan_callback(plan)
+                    approved = self._plan_callback(plan_text)
                 if not approved:
+                    if agent_runtime:
+                        agent_runtime.reject_plan()
+                        yield ("agent_state", {"current_goal": user_input, "status": "idle", "tools_used": agent_runtime.state.tools_used})
                     yield ("agent_status", "done", user_input, "Plan rejected")
                     yield ("token", "Plan not approved. Please refine your request and try again.")
                     return
-                grounding = f"APPROVED PLAN:\n{plan}\n\nExecute each step of this approved plan in order. Report progress after each step."
+                if agent_runtime:
+                    agent_runtime.approve_plan()
+                    self._emit_bus("plan_approved", goal=user_input)
+                    yield ("agent_state", {"current_goal": user_input, "status": "executing", "tools_used": agent_runtime.state.tools_used})
+                grounding = f"APPROVED PLAN:\n{plan_text}\n\nExecute each step of this approved plan in order. Report progress after each step."
                 yield ("agent_status", "executing", user_input, "Starting execution")
 
+                # Profile dispatch: classify goal into agent profile
+                profile_cfg = self.cfg.get("agents", {}).get("profiles", {})
+                if not self._profile_router:
+                    self._profile_router = ProfileRouter(llm=self.router_llm)
+                self._active_profile = self._profile_router.classify(user_input)
+                if self._active_profile.name != "default":
+                    yield ("status", f"Profile: {self._active_profile.name}")
+
             temp = self.temps.get(mode, 0.0)
-            lc_tools = self._tools_for_mode(mode)
+            profile = getattr(self, '_active_profile', None)
+            lc_tools = self._tools_for_mode(mode, profile=profile)
 
             _SEARCH_TOOL_NAMES = {"web_search", "web_search_pipeline", "web_fetch", "fetch_url"}
-            _skip_search = bool(grounding)  # skip search tools on first step if we already have results
+            _skip_search = bool(grounding)
             if _skip_search:
                 lc_tools = [t for t in lc_tools if t.name not in _SEARCH_TOOL_NAMES]
 
@@ -713,7 +776,7 @@ class CozmoRuntime:
                         if lc_tools else self.model_manager.client(mode, temp))
 
             msgs = [SystemMessage(content=self._system_prompt(
-                user_input, mode, grounding, attachments, activated_skills))]
+                user_input, mode, grounding, attachments, activated_skills, profile))]
             msgs += self._history_messages()
 
             if has_images:
@@ -723,44 +786,37 @@ class CozmoRuntime:
                 msgs.append(HumanMessage(content=user_input))
 
             final = ""
-            seen_calls: set[str] = set()  # break identical-call loops
-            failed_steps: list[str] = []  # track failures for error recovery
+            seen_calls: set[str] = set()
+            failed_steps: list[str] = []
             for step in range(self.max_steps):
                 acc = None
                 content_buf = ""
-                suppress = False
-                streamed = False
 
                 if mode == "agent":
                     yield ("agent_status", "executing", user_input, f"Step {step + 1}/{self.max_steps}")
                     yield ("thinking", f"Step {step + 1}/{self.max_steps}",
                            f"Executing step {step + 1}", None)
+                    yield ("progress", step + 1, self.max_steps, f"Step {step + 1}/{self.max_steps}")
+                    self._emit_bus("step_started", step=step + 1, goal=user_input)
 
                 for chunk in runnable.stream(msgs):
                     if self._check_stop():
                         return
                     acc = chunk if acc is None else acc + chunk
+
+                    reasoning_content = chunk.additional_kwargs.get("reasoning_content", "")
+                    if reasoning_content:
+                        yield ("reasoning", reasoning_content)
+
                     piece = chunk.content or ""
                     if piece:
                         content_buf += piece
-                        # suppress content that looks like a text-fallback tool call
-                        if not streamed and not suppress:
-                            if content_buf.lstrip()[:1] == "{":
-                                suppress = True
-                        if not suppress:
-                            streamed = True
-                            yield ("token", piece)
+                        yield ("token", piece)
 
                 ai = acc if acc is not None else AIMessage(content=content_buf)
                 calls = self._extract_calls(ai)
 
                 if not calls:
-                    # false-positive suppression: JSON-looking content that
-                    # wasn't a real tool call — surface it after all.
-                    if suppress and not streamed:
-                        yield ("token", content_buf)
-                    # the model may activate a skill by writing @skill <name>;
-                    # inject it and keep looping so it can actually use it.
                     newly = self._scan_skills(content_buf, activated_skills)
                     if newly:
                         activated_skills.extend(newly)
@@ -775,7 +831,6 @@ class CozmoRuntime:
                     final = content_buf.strip()
                     break
 
-                # model wants tools: record the turn, run them, feed results back
                 msgs.append(ai if isinstance(ai, AIMessage)
                             else AIMessage(content=content_buf))
                 names = ", ".join(c["name"] for c in calls)
@@ -791,7 +846,8 @@ class CozmoRuntime:
                         return
                     sig = f"{c['name']}:{args_sig}"
                     call_id = f"call-{step}-{c['name']}"
-                    yield ("tool_call", c["name"], c["args"], call_id)
+                    yield ("tool_call", c["name"], c["args"], call_id, self._tool_category(c["name"]))
+                    self._emit_bus("tool_called", tool=c["name"], args=c["args"], step=step)
                     if sig in seen_calls:
                         out = (f"Error: you already made this exact {c['name']} call "
                                f"and have its result above. Use it, or try a "
@@ -799,29 +855,45 @@ class CozmoRuntime:
                     else:
                         seen_calls.add(sig)
                         out = self._exec_tool(c["name"], c["args"])
-                    # Track failures for agent error recovery
-                    if mode == "agent" and out.startswith("Error"):
-                        failed_steps.append(f"Step {step + 1}: {c['name']} failed — {out[:200]}")
+                    if mode == "agent":
+                        if agent_runtime:
+                            agent_runtime.record_tool_call(c["name"], c["args"], out)
+                            yield ("agent_state", {"current_goal": user_input, "status": agent_runtime.state.status.value, "tools_used": agent_runtime.state.tools_used})
+                        if out.startswith("Error"):
+                            failed_steps.append(f"Step {step + 1}: {c['name']} failed — {out[:200]}")
+                            self._emit_bus("step_failed", step=step + 1, tool=c["name"], error=out[:200])
+                            # Reflector: analyze failure, append suggestion to tool result
+                            if self.reflector and self.reflector.lessons:
+                                matches = self.reflector.lessons.find_matches(c["name"], out)
+                                if matches:
+                                    reflection = "\n\nReflection from past failures:\n"
+                                    for l in matches:
+                                        reflection += f"- {l.suggestion}\n"
+                                    out += reflection
+                        else:
+                            self._emit_bus("step_completed", step=step + 1, tool=c["name"])
+                    elif self.reflector and out.startswith("Error"):
+                        # Non-agent mode still learns from failures
+                        self.reflector.after_step(c["name"], c["args"], out)
                     diff = self._compute_diff(c["name"], c["args"])
                     yield ("tool_result", c["name"], out, call_id, diff)
+                    self._emit_bus("tool_result", tool=c["name"], call_id=call_id,
+                                   is_error=out.startswith("Error"))
                     msgs.append(ToolMessage(content=out, tool_call_id=c["id"]))
                     if self._check_stop():
                         return
                 yield ("thinking", "Thinking...", "Processing tool results and forming response", None)
 
-                # after first step, restore full search tools
                 if _skip_search:
                     _skip_search = False
                     full_tools = self._tools_for_mode(mode)
                     runnable = (self.model_manager.bind_tools(mode, full_tools, temperature=temp)
                                 if full_tools else self.model_manager.client(mode, temp))
             else:
-                # exhausted max_steps without a final answer
                 final = ("I ran out of steps before finishing. Here's where I "
                          "got to — ask me to continue if you want me to keep going.")
                 yield ("token", final)
 
-            # Agent error recovery: append failure summary
             if mode == "agent" and failed_steps:
                 fail_summary = "\n\n**Issues encountered:**\n" + "\n".join(f"- {f}" for f in failed_steps)
                 final = (final or "") + fail_summary
@@ -831,11 +903,19 @@ class CozmoRuntime:
                 final = "(no response — the model returned empty output; try rephrasing)"
                 yield ("token", final)
 
+            if agent_runtime and mode == "agent":
+                agent_runtime.mark_complete(final)
+                yield ("agent_state", {"current_goal": agent_runtime.state.current_goal, "status": agent_runtime.state.status.value, "tools_used": agent_runtime.state.tools_used})
+                self._emit_bus("goal_completed", goal=user_input, result=final[:200])
             self._remember(user_input, final)
 
         except Exception as e:
             msg = f"I hit an error: {e}"
             yield ("token", msg)
+            if agent_runtime and mode == "agent":
+                agent_runtime.mark_error(str(e))
+                yield ("agent_state", {"current_goal": agent_runtime.state.current_goal, "status": agent_runtime.state.status.value, "tools_used": agent_runtime.state.tools_used, "error": str(e)[:200]})
+                self._emit_bus("goal_completed", goal=user_input or "", status="error", error=str(e)[:200])
             self._remember(user_input, msg)
 
     def run(self, user_input: str, attachments: list[dict] | None = None) -> str:

@@ -5,7 +5,11 @@ from langchain_ollama import OllamaEmbeddings
 
 
 class ChromaStore:
-    def __init__(self, collection_name: str, persist_dir: str, model="nomic-embed-text:latest"):
+    def __init__(self, collection_name: str, persist_dir: str, model: str | None = None):
+        if model is None:
+            from ..ollama_util import get_ollama_models, pick_model
+            installed = get_ollama_models()
+            model = pick_model(installed, "embedding") or "nomic-embed-text:latest"
         self.embedding = OllamaEmbeddings(model=model)
         self.client = chromadb.PersistentClient(path=persist_dir)
         self.collection = self.client.get_or_create_collection(

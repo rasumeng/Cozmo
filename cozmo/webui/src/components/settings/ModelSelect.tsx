@@ -26,7 +26,7 @@ export function ModelSelect({ value, models, onChange, disabled }: Props) {
       <button
         onClick={() => !disabled && setOpen((v) => !v)}
         disabled={disabled}
-        className={`flex items-center gap-2 w-48 bg-base-900 border border-base-700 rounded-lg px-2.5 py-1.5 text-xs text-base-200 font-mono outline-none transition-colors ${
+        className={`flex items-center gap-2 min-w-[180px] bg-base-900 border border-base-700 rounded-lg px-2.5 py-1.5 text-xs text-base-200 font-mono outline-none transition-colors ${
           disabled
             ? 'opacity-50 cursor-not-allowed'
             : 'hover:border-accent/40'

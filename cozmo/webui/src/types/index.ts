@@ -101,6 +101,45 @@ export interface DiffEntry {
   timestamp: number
 }
 
+export interface InlineStep {
+  id: string
+  type: 'thinking' | 'tool_call'
+  icon: string
+  label: string
+  detail?: string
+  query?: string
+  status: 'running' | 'completed' | 'error'
+  durationMs?: number
+  toolCallId?: string
+  toolName?: string
+  toolCategory?: string
+  toolSummary?: string
+  result?: string
+  diff?: DiffData
+  startedAt: number
+}
+
+export interface AgentStateInfo {
+  current_goal: string
+  status: string
+  tools_used: number
+  error?: string
+}
+
+export interface ProgressInfo {
+  current: number
+  total: number
+  label: string
+}
+
+export interface PlanStepInfo {
+  id: number
+  description: string
+  tool: string
+  depends_on: number[]
+  status: string
+}
+
 export interface ToolInfo {
   id: string
   name: string

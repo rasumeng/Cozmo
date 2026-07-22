@@ -29,7 +29,7 @@ export function GeneralSettings({ config, setConfig, lightweight, setLightweight
         <div className="flex items-center justify-between p-3 rounded-xl bg-base-800/50 border border-base-700">
           <div>
             <p className="text-sm text-base-100">Lightweight Mode</p>
-            <p className="text-xs text-base-500">Use openbmb/minicpm5 for all roles. Lowers RAM usage.</p>
+            <p className="text-xs text-base-500">Use a single smaller model for all roles. Lowers RAM usage.</p>
           </div>
           <button
             type="button"

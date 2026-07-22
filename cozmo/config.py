@@ -17,9 +17,14 @@ DEFAULT_CONFIG = {
         "coder": "ornith:9b",
         "vision": "qwen2.5vl:7b",
         "research": "qwen3:8b",
-        "max_tokens": 2048,
+        "max_tokens": 65536,
     },
     "ollama": {"url": "http://localhost:11434"},
+    "providers": {
+        "default": "ollama",
+        "ollama": {"url": "http://localhost:11434"},
+        "openai": {"api_key_env": "OPENAI_API_KEY"},
+    },
     "memory": {"max_turns_before_summary": 5, "max_short_term_pairs": 10},
     "router": {
         "use_llm": False,
@@ -47,7 +52,7 @@ DEFAULT_CONFIG = {
         "max_project_results": 3,
         "temperatures": {"chat": 0.6, "work": 0.0, "research": 0.2},
         "tool_gate": {
-            "chat": [],
+            "chat": ["search_knowledge", "read_knowledge", "calculator", "current_time", "search_memory"],
             "research": ["web_search", "web_search_pipeline", "web_fetch", "calculator"],
         },
     },
@@ -55,6 +60,13 @@ DEFAULT_CONFIG = {
         "primary": ["build", "plan"],
         "build": {"model": None, "permissions": {}},
         "plan": {"model": None, "permissions": {"write_file": "deny", "edit_file": "deny", "run_command": "deny"}},
+        "profiles": {
+            "default": {"description": "General-purpose agent"},
+            "researcher": {"description": "Research and information gathering", "tools": ["web_search", "web_search_pipeline", "web_fetch", "fetch_url", "search_knowledge", "read_knowledge", "read_file"]},
+            "coder": {"description": "Code writing and editing", "model": None},
+            "writer": {"description": "Documentation and prose writing"},
+            "planner": {"description": "Strategic planning and architecture"},
+        },
     },
     "permissions": {
         "write_file": "ask",

@@ -1,22 +1,24 @@
 import { useEffect, useRef, useState } from 'react'
-import { Sparkles, PanelRightClose, PanelRightOpen } from 'lucide-react'
-import { Conversation as ConversationType, Attachment, Project, AgentTaskFile } from '@/types'
+import { motion } from 'framer-motion'
+import { Sparkles } from 'lucide-react'
+import { Conversation as ConversationType, Attachment, Project, AgentTaskFile, InlineStep, PlanData } from '@/types'
 import { ConnectionState } from '@/services/cozmo'
 import type { SectionId } from '@/components/settings/SettingsModal'
 import { MessageBubble } from './MessageBubble'
-import { FileChangeCard } from './FileChangeCard'
+import { InlineTraceTimeline } from './InlineTraceTimeline'
 import { PromptInput } from './PromptInput'
 import { LandingPage } from './LandingPage'
-import { DiffEntry } from '@/types'
 
 interface Props {
   conversation: ConversationType
   connection: ConnectionState
   generating: boolean
-  activityOpen: boolean
+  inlineSteps: InlineStep[]
+  plan: PlanData | null
   onSend: (content: string, attachments?: Attachment[]) => void
   onStop: () => void
-  onToggleActivity: () => void
+  onApprovePlan: () => void
+  onRejectPlan: () => void
   activeConversationId?: string
   projects?: Project[]
   onAddToProject?: (convId: string, projId: string) => void
@@ -29,7 +31,6 @@ interface Props {
   onSetDirectory?: (path: string) => void
   permissionMode?: string
   onSetPermissionMode?: (mode: string) => void
-  diffEntries?: DiffEntry[]
   agentTask?: Project | null
   onListProjects?: (search?: string) => void
   onSelectProject?: (id: string) => void
@@ -47,10 +48,12 @@ export function Conversation({
   conversation,
   connection,
   generating,
-  activityOpen,
+  inlineSteps,
+  plan,
   onSend,
   onStop,
-  onToggleActivity,
+  onApprovePlan,
+  onRejectPlan,
   activeConversationId,
   projects,
   onAddToProject,
@@ -63,7 +66,6 @@ export function Conversation({
   onSetDirectory,
   permissionMode,
   onSetPermissionMode,
-  diffEntries,
   agentTask,
   onListProjects,
   onSelectProject,
@@ -95,13 +97,6 @@ export function Conversation({
             <span className={`w-1.5 h-1.5 rounded-full ${conn.dot}`} />
             {conn.text}
           </div>
-          <button
-            onClick={onToggleActivity}
-            className="p-1.5 rounded-lg text-base-400 hover:text-base-100 hover:bg-base-800 transition-colors"
-            title="Toggle activity panel"
-          >
-            {activityOpen ? <PanelRightClose size={17} /> : <PanelRightOpen size={17} />}
-          </button>
         </div>
       </header>
 
@@ -110,20 +105,33 @@ export function Conversation({
           {conversation.messages.length === 0 ? (
             <LandingPage mode={conversation.mode} onSuggestion={setSuggestionText} />
           ) : (
-            conversation.messages.map((m, i) => (
+            conversation.messages.map((m, i, arr) => (
               <div key={m.id}>
                 <MessageBubble message={m} />
-                {i === conversation.messages.length - 1 && m.role === 'assistant' && diffEntries && diffEntries.length > 0 && (
-                  <div className="mt-2 space-y-1.5">
-                    {diffEntries.map(de => (
-                      <FileChangeCard
-                        key={de.id}
-                        path={de.path}
-                        added={de.added}
-                        removed={de.removed}
-                        diff={de.diff}
+                {m.role === 'user' && (i === arr.length - 1 || i === arr.length - 2) && (generating || inlineSteps.length > 0) && (
+                  <div className="mt-3">
+                    {inlineSteps.length === 0 ? (
+                      <motion.div
+                        initial={{ opacity: 0, y: 4 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        className="flex items-center gap-2 px-1"
+                      >
+                        <div className="flex gap-1">
+                          <span className="w-2 h-2 rounded-full bg-accent/70 animate-glow" />
+                          <span className="w-2 h-2 rounded-full bg-accent/70 animate-glow" style={{ animationDelay: '0.2s' }} />
+                          <span className="w-2 h-2 rounded-full bg-accent/70 animate-glow" style={{ animationDelay: '0.4s' }} />
+                        </div>
+                        <span className="text-[12px] text-base-500">Thinking...</span>
+                      </motion.div>
+                    ) : (
+                      <InlineTraceTimeline
+                        steps={inlineSteps}
+                        plan={plan}
+                        onApprovePlan={onApprovePlan}
+                        onRejectPlan={onRejectPlan}
+                        generating={generating}
                       />
-                    ))}
+                    )}
                   </div>
                 )}
               </div>

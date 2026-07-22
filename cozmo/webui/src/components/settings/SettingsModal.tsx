@@ -61,6 +61,10 @@ export function SettingsModal({ open, onClose, initialSection, onCreateSkill }: 
     const patch: Record<string, unknown> = { models: config.models }
     if (config.permissions) patch.permissions = config.permissions
     patch.runtime = { ...((config as any).runtime ?? {}), lightweight_mode: lightweight }
+    if ((config as any).agent) patch.agent = (config as any).agent
+    if ((config as any).mcp) patch.mcp = (config as any).mcp
+    if ((config as any).personality) patch.personality = (config as any).personality
+    if ((config as any).memory) patch.memory = (config as any).memory
     saveConfig(patch).catch(() => {})
     setDirty(false)
   }

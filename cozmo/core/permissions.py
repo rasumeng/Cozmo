@@ -1,6 +1,15 @@
-"""Permission resolver with pattern-based rules and session-level allowlists."""
+"""Permission resolver with risk-aware pattern rules and session-level allowlists.
+
+Resolution order:
+  1. Session allowlist (user said "always allow" this session)
+  2. Agent-specific config rules override
+  3. Global config rules
+  4. Tool risk level (fallback)
+"""
 
 from fnmatch import fnmatch
+
+from .tool_risk import ToolRisk, get_tool_risk
 
 
 def _input_key(tool: str, args: dict) -> str:
@@ -19,7 +28,14 @@ class PermissionResolver:
         self._session_allow: set[str] = set()
 
     def resolve(self, tool: str, args: dict, agent: str = "build") -> str:
-        """Check permission. Returns 'allow', 'deny', or 'ask'."""
+        """Check permission. Returns 'allow', 'deny', or 'ask'.
+
+        Resolution order:
+          1. Session allowlist
+          2. Agent config rules
+          3. Global config rules
+          4. Tool risk level (fallback)
+        """
         key = _input_key(tool, args)
 
         # Session allowlist check first
@@ -38,7 +54,13 @@ class PermissionResolver:
         if result:
             return result
 
-        return "allow"
+        # Fallback: tool risk level
+        risk = get_tool_risk(tool)
+        if risk == ToolRisk.LOW:
+            return "allow"
+        if risk == ToolRisk.CRITICAL:
+            return "deny"
+        return "ask"
 
     def _match(self, tool: str, key: str, rules: dict) -> str | None:
         if tool not in rules:
@@ -52,14 +74,34 @@ class PermissionResolver:
                     return action
         return None
 
+    def risk_of(self, tool: str) -> ToolRisk:
+        """Return the risk level for a tool (agent config rules can override)."""
+        key = tool
+        agent_cfg = self.cfg.get("agents", {}).get("build", {})
+        result = self._match(tool, key, agent_cfg.get("permissions", {}))
+        if result == "deny":
+            return ToolRisk.CRITICAL
+        global_result = self._match(tool, key, self.cfg.get("permissions", {}))
+        if global_result == "deny":
+            return ToolRisk.CRITICAL
+        return get_tool_risk(tool)
+
     def prompt(self, tool: str, args: dict, agent: str) -> bool:
         """Ask user. Returns True if allowed."""
         if self.auto:
             return True
         key = _input_key(tool, args)
 
+        risk = self.risk_of(tool)
+        prefix = ""
+        if risk == ToolRisk.HIGH:
+            prefix = "⚠️ HIGH RISK: "
+        elif risk == ToolRisk.CRITICAL:
+            print(f"\n🚫 [{agent}] {tool}: {key} — DENIED (critical risk)")
+            return False
+
         while True:
-            print(f"\n⚠  [{agent}] {tool}: {key}")
+            print(f"\n{prefix}⚠  [{agent}] {tool}: {key}")
             ans = input("Allow (o)nce / (a)lways / (d)eny: ").strip().lower()
             if ans in ("o", "once"):
                 return True

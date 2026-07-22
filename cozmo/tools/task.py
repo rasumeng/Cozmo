@@ -1,3 +1,5 @@
+import concurrent.futures
+import json
 import threading
 import logging
 from pathlib import Path
@@ -9,6 +11,10 @@ from . import register_tool
 log = logging.getLogger("cozmo.subagent")
 
 AGENT_DIR = Path.home() / ".cozmo" / "agents"
+
+_SUBAGENT_DEPTH = threading.local()
+_MAX_DEPTH = 3
+_SUBAGENT_TIMEOUT = 60  # seconds
 
 BUILTIN_AGENTS = {
     "explore": {
@@ -45,7 +51,6 @@ BUILTIN_AGENTS = {
 
 
 def _load_custom_agents() -> dict:
-    """Load custom agent definitions from ~/.cozmo/agents/*.md"""
     agents = {}
     if not AGENT_DIR.exists():
         return agents
@@ -70,14 +75,28 @@ def _load_custom_agents() -> dict:
 
 
 def _get_agent(name: str) -> dict | None:
-    """Get agent config by name. Checks builtins first, then custom."""
     all_agents = {**BUILTIN_AGENTS, **_load_custom_agents()}
     return all_agents.get(name)
 
 
+def _current_depth() -> int:
+    return getattr(_SUBAGENT_DEPTH, 'depth', 0)
+
+
+def _format_result(text: str, subagent_type: str, success: bool) -> str:
+    """Format subagent result as structured JSON for the calling agent."""
+    payload = {
+        "subagent": subagent_type,
+        "success": success,
+        "result": text[:4000],
+    }
+    return json.dumps(payload)
+
+
 @register_tool()
-def task(description: str, prompt: str, subagent_type: str = "general") -> str:
-    """Spawn a subagent to handle a focused task. Returns the subagent's response.
+def task(description: str, prompt: str, subagent_type: str = "general",
+         timeout: int = 60, structured: bool = True) -> str:
+    """Spawn a subagent to handle a focused task.
 
     Use this when you need to delegate work to a specialized agent:
     - 'explore': Read-only code exploration (find files, read code, answer questions)
@@ -89,53 +108,92 @@ def task(description: str, prompt: str, subagent_type: str = "general") -> str:
         description: Short task name (for display).
         prompt: Detailed instructions for the subagent.
         subagent_type: Agent type to spawn (default: 'general').
+        timeout: Max seconds for subagent execution (default: 60).
+        structured: Return structured JSON with success/result fields (default: True).
     """
+    depth = _current_depth()
+    if depth >= _MAX_DEPTH:
+        err = f"Max subagent depth ({_MAX_DEPTH}) reached. Cannot spawn deeper."
+        log.warning(err)
+        return _format_result(err, subagent_type, False) if structured else err
+
     agent_cfg = _get_agent(subagent_type)
     if not agent_cfg:
         available = ", ".join(list(BUILTIN_AGENTS.keys()) + [a for a in _load_custom_agents()])
-        return f"Error: Unknown agent type '{subagent_type}'. Available: {available}"
+        err = f"Unknown agent type '{subagent_type}'. Available: {available}"
+        return _format_result(err, subagent_type, False) if structured else err
 
+    _SUBAGENT_DEPTH.depth = depth + 1
     try:
         from ..core.runtime import CozmoRuntime
         from ..core.model_manager import ModelManager
         from ..config import load_config
+        from ..core.tool_registry import ToolRegistry
 
         cfg = load_config()
-        rt_cfg = cfg.get("runtime", {})
-
-        # Build a minimal runtime for the subagent
-        mm = ModelManager(cfg.get("models", {}))
+        ollama_url = cfg.get("ollama", {}).get("url", "http://localhost:11434")
+        mm = ModelManager(ollama_url, cfg.get("models", {}),
+                          providers_cfg=cfg.get("providers", {}))
         if agent_cfg.get("model"):
-            mm.set_lightweight_model(agent_cfg["model"])
+            mm.set_override("agent", agent_cfg["model"])
+
+        registry = ToolRegistry()
+        from ..tools import TOOL_REGISTRY
+        for name, fn in TOOL_REGISTRY.items():
+            registry.register(name, fn)
 
         sub_runtime = CozmoRuntime(
             model_manager=mm,
-            memory=None,  # No memory for subagents
-            registry=None,  # Use default registry
+            memory=None,
+            registry=registry,
             cfg=cfg,
         )
 
-        # Build subagent system prompt
         system_parts = [agent_cfg.get("system", "")]
         if agent_cfg.get("permissions"):
             denied = [k for k, v in agent_cfg["permissions"].items() if v == "deny"]
             if denied:
                 system_parts.append(f"Denied tools: {', '.join(denied)}")
 
-        # Override system prompt
+        context_hint = description.strip()
+        if context_hint:
+            system_parts.append(f"\nParent task context: {context_hint}")
+        system_parts.append(
+            "\nYou are a subagent. Complete only the task given. "
+            "Do not spawn further subagents. "
+            "Return a complete, self-contained answer."
+        )
+
         sub_runtime._agent_system = "\n".join(system_parts)
+        sub_runtime.stop_event = threading.Event()
 
-        # Run the subagent
-        result_parts = []
-        for kind, text in sub_runtime.run_stream(prompt):
-            if kind == "token":
-                result_parts.append(text)
+        def _run():
+            result_parts = []
+            for kind, text in sub_runtime.run_stream(prompt):
+                if kind == "token":
+                    result_parts.append(text)
+            return "".join(result_parts).strip()
 
-        result = "".join(result_parts).strip()
+        actual_timeout = min(timeout, _SUBAGENT_TIMEOUT)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            fut = pool.submit(_run)
+            try:
+                result = fut.result(timeout=actual_timeout)
+            except concurrent.futures.TimeoutError:
+                sub_runtime.stop_event.set()
+                err = f"Subagent '{subagent_type}' timed out after {actual_timeout}s."
+                log.warning(err)
+                return _format_result(err, subagent_type, False) if structured else err
+
         if not result:
-            return f"Subagent '{subagent_type}' completed but produced no output."
-        return result
+            err = f"Subagent '{subagent_type}' completed but produced no output."
+            return _format_result(err, subagent_type, False) if structured else err
+
+        return _format_result(result, subagent_type, True) if structured else result
 
     except Exception as e:
         log.error("Subagent '%s' failed: %s", subagent_type, e)
-        return f"Subagent error: {e}"
+        err = str(e)
+        return _format_result(err, subagent_type, False) if structured else err
+    finally:
+        _SUBAGENT_DEPTH.depth = _current_depth() - 1

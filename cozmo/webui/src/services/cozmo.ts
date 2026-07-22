@@ -7,8 +7,8 @@ export type ServerEvent =
   | { type: 'token'; text: string }
   | { type: 'thinking'; text: string; detail?: string; query?: string }
   | { type: 'status'; text: string; detail?: string; query?: string }
-  | { type: 'plan'; plan: string }
-  | { type: 'tool_call'; tool: string; args: Record<string, unknown>; id: string }
+  | { type: 'plan'; plan: string; steps?: Array<{id: number; description: string; tool: string; depends_on: number[]; status: string}> }
+  | { type: 'tool_call'; tool: string; args: Record<string, unknown>; id: string; category?: string }
   | { type: 'tool_result'; tool: string; result: string; id: string; diff?: DiffData }
   | { type: 'agent_config'; model?: string; system_prompt?: string; max_steps?: number; temperature?: number }
   | { type: 'agent_memory'; action: string; results?: Array<Record<string, unknown>>; error?: string }
@@ -27,6 +27,10 @@ export type ServerEvent =
   | { type: 'project_created'; project: Project; indexed: number }
   | { type: 'project_selected'; project: Project }
   | { type: 'permission_request'; tool: string; args: Record<string, unknown> }
+  | { type: 'reasoning'; text: string }
+  | { type: 'agent_status'; text: string; detail?: string; query?: string }
+  | { type: 'progress'; current: number; total: number; label: string }
+  | { type: 'agent_state'; current_goal: string; status: string; tools_used: number; error?: string }
   | { type: 'done' }
   | { type: 'error'; text: string }
 
@@ -85,12 +89,13 @@ export class CozmoClient {
     return false
   }
 
-  sendChat(content: string, conversationId?: string, attachments?: Attachment[], projectId?: string) {
+  sendChat(content: string, conversationId?: string, attachments?: Attachment[], projectId?: string, mode?: string) {
     const payload: Record<string, unknown> = { type: 'chat', content, conversation_id: conversationId }
     if (attachments?.length) {
       payload.attachments = attachments.map(a => ({ id: a.id, type: a.type, name: a.name, mime: a.mime, size: a.size }))
     }
     if (projectId) payload.project_id = projectId
+    if (mode) payload.mode = mode
     return this.send(payload)
   }
   stop() {

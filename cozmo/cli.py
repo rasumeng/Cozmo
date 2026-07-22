@@ -72,16 +72,28 @@ def interactive_session(cfg: dict, initial_query: str | None = None):
     from .core.model_manager import ModelManager
     from .memory.manager import MemoryManager
     from .code_indexer import ProjectIndex
-    from .ollama_util import resolve_minicpm5
+    from .ollama_util import get_ollama_models, pick_model, resolve_minicpm5
 
     ollama_url = cfg.get("ollama", {}).get("url", "http://localhost:11434")
-    lightweight_model = resolve_minicpm5(ollama_url)
+    installed = get_ollama_models(ollama_url)
+    lightweight_model = resolve_minicpm5(ollama_url) or pick_model(installed, "chat")
     is_lightweight = cfg.get("runtime", {}).get("lightweight_mode", False)
     mm = ModelManager(ollama_url, cfg.get("models", {}),
-                      lightweight_model=lightweight_model if is_lightweight else None)
-    router_llm = OllamaModel(lightweight_model, ollama_url)
+                      lightweight_model=lightweight_model if is_lightweight else None,
+                      providers_cfg=cfg.get("providers", {}))
+    router_model = cfg.get("models", {}).get("chat") or pick_model(installed, "chat")
+    router_llm = OllamaModel(router_model, ollama_url)
     memory = MemoryManager(router_llm, persist_dir=str(Path.home() / ".cozmo" / "memory"))
     project_index = ProjectIndex(Path.cwd())
+    from .scheduler import Scheduler
+    from .tools.scheduler_task import init_scheduler_tool
+    _sched = Scheduler()
+    _sched.on_trigger = lambda s: None  # No background runner in CLI
+    _sched.start()
+    init_scheduler_tool(_sched)
+    from .memory.knowledge_index import init_knowledge_index
+    init_knowledge_index(knowledge_dir=cfg.get("knowledge_dir", "./knowledge"),
+                         persist_dir=str(Path.home() / ".cozmo" / "knowledge_index"))
     runtime = CozmoRuntime(model_manager=mm, memory=memory, project_index=project_index, cfg=cfg,
                            router_llm=router_llm)
     runtime.set_permission_callback(
@@ -107,16 +119,28 @@ def coding_session(cfg: dict, project_path: Path, query: str | None = None, auto
     from .core.model_manager import ModelManager
     from .memory.manager import MemoryManager
     from .code_indexer import ProjectIndex
-    from .ollama_util import resolve_minicpm5
+    from .ollama_util import get_ollama_models, pick_model, resolve_minicpm5
 
     ollama_url = cfg.get("ollama", {}).get("url", "http://localhost:11434")
-    lightweight_model = resolve_minicpm5(ollama_url)
+    installed = get_ollama_models(ollama_url)
+    lightweight_model = resolve_minicpm5(ollama_url) or pick_model(installed, "chat")
     is_lightweight = cfg.get("runtime", {}).get("lightweight_mode", False)
     mm = ModelManager(ollama_url, cfg.get("models", {}),
-                      lightweight_model=lightweight_model if is_lightweight else None)
-    router_llm = OllamaModel(lightweight_model, ollama_url)
+                      lightweight_model=lightweight_model if is_lightweight else None,
+                      providers_cfg=cfg.get("providers", {}))
+    router_model = cfg.get("models", {}).get("chat") or pick_model(installed, "chat")
+    router_llm = OllamaModel(router_model, ollama_url)
     memory = MemoryManager(router_llm, persist_dir=str(Path.home() / ".cozmo" / "memory"))
     project_index = ProjectIndex(project_path)
+    from .scheduler import Scheduler
+    from .tools.scheduler_task import init_scheduler_tool
+    _sched = Scheduler()
+    _sched.on_trigger = lambda s: None  # No background runner in CLI
+    _sched.start()
+    init_scheduler_tool(_sched)
+    from .memory.knowledge_index import init_knowledge_index
+    init_knowledge_index(knowledge_dir=cfg.get("knowledge_dir", "./knowledge"),
+                         persist_dir=str(Path.home() / ".cozmo" / "knowledge_index"))
     runtime = CozmoRuntime(model_manager=mm, memory=memory, project_index=project_index, cfg=cfg,
                            router_llm=router_llm)
     runtime._perms.auto = auto
@@ -217,7 +241,8 @@ def run_telegram(cfg: dict):
     lightweight_model = resolve_minicpm5(ollama_url)
     is_lightweight = cfg.get("runtime", {}).get("lightweight_mode", False)
     mm = ModelManager(ollama_url, cfg.get("models", {}),
-                      lightweight_model=lightweight_model if is_lightweight else None)
+                      lightweight_model=lightweight_model if is_lightweight else None,
+                      providers_cfg=cfg.get("providers", {}))
     router_llm = OllamaModel(lightweight_model, ollama_url)
     memory = MemoryManager(router_llm, persist_dir=str(Path.home() / ".cozmo" / "memory"))
     project_index = ProjectIndex(Path.cwd())

@@ -1,18 +1,31 @@
 from pathlib import Path
-from .memory.chroma_store import ChromaStore
+from sentence_transformers import SentenceTransformer
+from .memory.lancedb_store import LanceStore
 
 IGNORE_DIRS = {".git", "__pycache__", "node_modules", ".venv", "venv", ".cozmo", "target", "build", "dist"}
 
+
 class ProjectIndex:
-    def __init__(self, project_root: str | Path):
+    """Project code index using LanceDB + Sentence Transformers.
+
+    Indexes project files as chunked documents for semantic code search.
+    """
+
+    def __init__(self, project_root: str | Path, embed_model: str = "all-MiniLM-L6-v2"):
         self.root = Path(project_root).resolve()
-        self.store = ChromaStore(
-            persist_dir=str(self.root / ".cozmo" / "project_index"),
-            collection_name="project_index",
+        self._embedder = SentenceTransformer(embed_model)
+
+        def embed(text: str) -> list[float]:
+            return self._embedder.encode(text, normalize_embeddings=True).tolist()
+
+        self.store = LanceStore(
+            uri=str(self.root / ".cozmo" / "project_index"),
+            table_name="project_index",
+            embed_func=embed,
+            embed_dim=self._embedder.get_sentence_embedding_dimension() or 384,
         )
-    
+
     def index_all(self):
-        """Walk project dir, chunk files, store in CHroma."""
         docs = []
         for f in self.root.rglob("*"):
             if not f.is_file():
@@ -28,20 +41,15 @@ class ProjectIndex:
             rel = str(f.relative_to(self.root))
             docs.append({"id": rel, "text": text, "metadata": {"path": rel}})
         if docs:
-            self.store.add_texts(
-                texts=[d["text"] for d in docs],
-                metadatas=[d["metadata"] for d in docs],
-            )
-        return len(docs)
-    
-    def query(self, query: str, k: int = 3) -> str:
-        """Search project index, return concise snippets."""
-        results = self.store.similarity_search(query, k=k)
+            texts = [d["text"] for d in docs]
+            metas = [d["metadata"] for d in docs]
+            self.store.add_texts(texts, metas)
+
+    def query(self, text: str, k: int = 5) -> str:
+        results = self.store.similarity_search(text, k=k)
         if not results:
             return ""
-        parts = []
-        for r in results:
-            path = r["metadata"].get("path", "?")
-            text = r["text"][:300]
-            parts.append(f"--- {path} ---\n{text}")
-        return "\n".join(parts)
+        return "\n".join(
+            f"- {r['metadata'].get('path', '?')}: {r['text'][:500]}"
+            for r in results
+        )

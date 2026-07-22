@@ -365,7 +365,7 @@ export function ConnectorsSection({ config, setConfig, setDirty }: Props) {
               {selectedCatalog.env_vars.map((ev) => (
                 <div key={ev.key}>
                   <label className="block text-[10px] text-base-500 mb-0.5">{ev.label}</label>
-                  <input value={catalogEnvVars[ev.key] ?? ''} onChange={(e) => setCatalogEnvVars({ ...catalogEnvVars, [ev.key]: e.target.value })} placeholder={ev.optional ? `(optional) ${ev.key}` : ev.key} type={ev.secret ? 'password' : 'text'} className="w-full bg-base-800 border border-base-700 rounded-lg px-3 py-2 text-xs text-base-200 placeholder:text-base-500 outline-none focus:border-accept/40 font-mono" />
+                  <input value={catalogEnvVars[ev.key] ?? ''} onChange={(e) => setCatalogEnvVars({ ...catalogEnvVars, [ev.key]: e.target.value })} placeholder={ev.optional ? `(optional) ${ev.key}` : ev.key} type={ev.secret ? 'password' : 'text'} className="w-full bg-base-800 border border-base-700 rounded-lg px-3 py-2 text-xs text-base-200 placeholder:text-base-500 outline-none focus:border-accent/40 font-mono" />
                 </div>
               ))}
             </div>

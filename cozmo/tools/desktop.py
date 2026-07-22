@@ -14,8 +14,14 @@ OLLAMA_URL = "http://localhost:11434"
 
 def _get_vision_model() -> str:
     from .. import config
+    from ..ollama_util import get_ollama_models, pick_model
     cfg = config.load()
-    return cfg.get("models", {}).get("vision", "qwen2.5vl:7b")
+    model = cfg.get("models", {}).get("vision")
+    if model:
+        return model
+    ollama_url = cfg.get("ollama", {}).get("url", "http://localhost:11434")
+    installed = get_ollama_models(ollama_url)
+    return pick_model(installed, "vision")
 
 
 def _analyze_image(image_path: str, prompt: str = "Describe this image in detail.") -> str:

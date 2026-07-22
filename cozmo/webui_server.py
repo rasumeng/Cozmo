@@ -52,6 +52,12 @@ from fastapi.staticfiles import StaticFiles
 
 from . import config
 from .tools import TOOL_REGISTRY
+from .core.router import route
+from .core.chat.handler import ChatHandler
+from .core.llm import OllamaModel
+from .core.agent.runtime import AgentRuntime
+from .core.agent.event_bus import EventBus, EventType
+from .core.agent.reflector import Reflector, LessonStore
 
 DIST_DIR = Path(__file__).parent / "webui" / "dist"
 CHATS_DIR = Path.home() / ".cozmo" / "chats"
@@ -137,7 +143,7 @@ def _start_background_run(goal: str, cfg: dict) -> str:
                     return
                 kind = item[0]
                 if kind == "tool_call":
-                    _, name, args, call_id = item
+                    _, name, args, call_id = item[:4]
                     _emit("background_run_log", log_type="tool_call",
                           tool=name, args=args, call_id=call_id)
                 elif kind == "tool_result":
@@ -154,6 +160,8 @@ def _start_background_run(goal: str, cfg: dict) -> str:
                     _emit("background_run_update", status="running", goal=goal, step=item[1])
                 elif kind == "plan":
                     continue  # auto-approve plan for background runs
+                elif kind in ("progress", "agent_state"):
+                    pass  # not needed for background run logs
             _emit("background_run_update", status="done", goal=goal)
         except Exception as e:
             import traceback
@@ -230,6 +238,8 @@ def _ensure_scheduler(cfg: dict):
         _scheduler_inst = Scheduler()
         _scheduler_inst.on_trigger = lambda s: _start_background_run(s.goal, cfg)
         _scheduler_inst.start()
+        from .tools.scheduler_task import init_scheduler_tool
+        init_scheduler_tool(_scheduler_inst)
         return _scheduler_inst
 
 
@@ -248,20 +258,26 @@ def get_backend(cfg: dict) -> dict:
         from .core.model_manager import ModelManager
         from .memory.manager import MemoryManager
         from .code_indexer import ProjectIndex
-        from .ollama_util import resolve_minicpm5
+        from .memory.knowledge_index import init_knowledge_index
+        from .ollama_util import get_ollama_models, pick_model, resolve_minicpm5
         from .core.tool_registry import ToolRegistry
         from .core.providers.mcp import MCPManager
         from .core.runtime import _load_all_skills
         from .tools import TOOL_REGISTRY
 
         ollama_url = cfg.get("ollama", {}).get("url", "http://localhost:11434")
-        lightweight_model = resolve_minicpm5(ollama_url)
+        installed = get_ollama_models(ollama_url)
+        lightweight_model = resolve_minicpm5(ollama_url) or pick_model(installed, "chat")
         is_lightweight = cfg.get("runtime", {}).get("lightweight_mode", False)
         mm = ModelManager(ollama_url, cfg.get("models", {}),
-                          lightweight_model=lightweight_model if is_lightweight else None)
-        router_llm = OllamaModel(lightweight_model, ollama_url)
+                          lightweight_model=lightweight_model if is_lightweight else None,
+                          providers_cfg=cfg.get("providers", {}))
+        router_model = cfg.get("models", {}).get("chat") or pick_model(installed, "chat")
+        router_llm = OllamaModel(router_model, ollama_url)
         memory = MemoryManager(router_llm, persist_dir=str(Path.home() / ".cozmo" / "memory"))
         project_index = ProjectIndex(Path.cwd())
+        ki = init_knowledge_index(knowledge_dir=cfg.get("knowledge_dir", "./knowledge"),
+                                   persist_dir=str(Path.home() / ".cozmo" / "knowledge_index"))
 
         registry = ToolRegistry()
         for name, fn in TOOL_REGISTRY.items():
@@ -278,6 +294,16 @@ def get_backend(cfg: dict) -> dict:
         # Skills read from disk once, shared read-only across sessions.
         skills = _load_all_skills()
 
+        chat_handler = ChatHandler(mm, cfg, memory=memory)
+        agent_runtime = AgentRuntime(
+            model_manager=mm,
+            tool_registry=registry,
+            planner_llm=router_llm,
+            cfg=cfg,
+            skills=skills,
+        )
+        reflector = Reflector()
+
         _shared_backend = {
             "model_manager": mm,
             "router_llm": router_llm,
@@ -286,6 +312,9 @@ def get_backend(cfg: dict) -> dict:
             "registry": registry,
             "mcp": mcp,
             "skills": skills,
+            "chat_handler": chat_handler,
+            "agent_runtime": agent_runtime,
+            "reflector": reflector,
         }
         return _shared_backend
 
@@ -306,6 +335,7 @@ def build_runtime(cfg: dict):
     from .core.runtime import CozmoRuntime
 
     b = get_backend(cfg)
+    event_bus = EventBus()
     runtime = CozmoRuntime(
         model_manager=b["model_manager"],
         memory=b["memory"],
@@ -314,9 +344,11 @@ def build_runtime(cfg: dict):
         cfg=cfg,
         router_llm=b["router_llm"],
         skills=b["skills"],
+        event_bus=event_bus,
+        reflector=b["reflector"],
     )
     runtime._mcp_manager = b["mcp"]  # shared; do NOT stop on session close
-    return runtime
+    return runtime, b["chat_handler"], b["agent_runtime"], event_bus
 
 
 def seed_default_skills():
@@ -337,7 +369,7 @@ class ChatSession:
     """One WebSocket connection = one runtime + one run at a time."""
 
     def __init__(self, cfg: dict, loop: asyncio.AbstractEventLoop):
-        self.runtime = build_runtime(cfg)
+        self.runtime, self.chat_handler, self.agent_runtime, self.event_bus = build_runtime(cfg)
         self.loop = loop
         self.events: asyncio.Queue = asyncio.Queue()
         self.stop_flag = threading.Event()
@@ -424,25 +456,53 @@ class ChatSession:
 
         def work():
             try:
-                for item in self.runtime.run_stream(user_input, resolved_atts, force_mode):
+                mode = force_mode or route(
+                    user_input, self.runtime.router_llm, self.runtime.history,
+                    bool(resolved_atts and any(a.get("type") == "image" for a in resolved_atts))
+                )
+                runtime_args = {
+                    "user_input": user_input,
+                    "attachments": resolved_atts,
+                    "force_mode": mode,
+                }
+                if mode == "agent" and self.agent_runtime:
+                    runtime_args["agent_runtime"] = self.agent_runtime
+                for item in self.runtime.run_stream(**runtime_args):
                     if self.stop_flag.is_set():
                         self._emit({"type": "thinking", "text": "Stopped by user", "detail": "Generation was cancelled by the user"})
                         break
-                    kind = item[0]
-                    if kind == "tool_call":
-                        _, name, args, call_id = item
-                        self._emit({"type": "tool_call", "tool": name, "args": args, "id": call_id})
-                    elif kind == "tool_result":
-                        _, name, result, call_id = item[:4]
-                        payload = {"type": "tool_result", "tool": name, "result": result, "id": call_id}
-                        if len(item) >= 5 and item[4] is not None:
-                            payload["diff"] = item[4]
-                        self._emit(payload)
-                    else:
-                        kind, text = item[0], item[1]
-                        detail = item[2] if len(item) > 2 else None
-                        query = item[3] if len(item) > 3 else None
-                        self._emit({"type": kind, "text": text, "detail": detail, "query": query})
+                        kind = item[0]
+                        if kind == "tool_call":
+                            _, name, args, call_id = item[:4]
+                            payload = {"type": "tool_call", "tool": name, "args": args, "id": call_id}
+                            if len(item) >= 5 and item[4] is not None:
+                                payload["category"] = item[4]
+                            self._emit(payload)
+                        elif kind == "tool_result":
+                            _, name, result, call_id = item[:4]
+                            payload = {"type": "tool_result", "tool": name, "result": result, "id": call_id}
+                            if len(item) >= 5 and item[4] is not None:
+                                payload["diff"] = item[4]
+                            self._emit(payload)
+                        elif kind == "plan":
+                            text = item[1]
+                            payload = {"type": "plan", "plan": text}
+                            if len(item) >= 5 and item[4] is not None:
+                                payload["steps"] = item[4]
+                            self._emit(payload)
+                        elif kind == "progress":
+                            _, current, total, label = item
+                            self._emit({"type": "progress", "current": current, "total": total, "label": label})
+                        elif kind == "agent_state":
+                            data = item[1]
+                            self._emit({"type": "agent_state", **data})
+                        elif kind == "reasoning":
+                            self._emit({"type": "reasoning", "text": item[1]})
+                        else:
+                            text = item[1]
+                            detail = item[2] if len(item) > 2 else None
+                            query = item[3] if len(item) > 3 else None
+                            self._emit({"type": kind, "text": text, "detail": detail, "query": query})
             except Exception as e:
                 self._emit({"type": "error", "text": str(e)})
             finally:
@@ -684,10 +744,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
         def deep_merge(base: dict, patch: dict):
             for k, v in patch.items():
                 if k in base and isinstance(base[k], dict) and isinstance(v, dict):
-                    if k == "models":
-                        base[k] = v
-                    else:
-                        deep_merge(base[k], v)
+                    deep_merge(base[k], v)
                 else:
                     base[k] = v
         deep_merge(cfg, body)
@@ -695,7 +752,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
         CONFIG_PATH = config.CONFIG_PATH
         CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
         CONFIG_PATH.write_text(tomli_w.dumps(cfg), "utf-8")
-        # notify the shared MCP manager so it syncs its connections
+        # notify the shared backend so in-memory state matches disk
         with _backend_lock:
             backend = _shared_backend
         if backend:
@@ -703,6 +760,20 @@ def create_app(cfg: dict | None = None) -> FastAPI:
                 backend["mcp"].refresh_from_config(cfg)
             except Exception as e:
                 print(f"[cozmo] MCP config refresh failed: {e}")
+            mm = backend.get("model_manager")
+            if mm:
+                if "models" in body:
+                    mm.reload_models(cfg.get("models", {}))
+                runtime = body.get("runtime", {})
+                if "lightweight_mode" in runtime:
+                    is_lw = runtime["lightweight_mode"]
+                    lm = None
+                    if is_lw:
+                        from .ollama_util import resolve_minicpm5, get_ollama_models, pick_model
+                        ollama_url = cfg.get("ollama", {}).get("url", "http://localhost:11434")
+                        installed_list = get_ollama_models(ollama_url)
+                        lm = resolve_minicpm5(ollama_url) or pick_model(installed_list, "chat")
+                    mm.set_lightweight_mode(is_lw, lm)
         return {"ok": True}
 
     # ── Ollama available models ─────────────────────────────────
@@ -733,9 +804,12 @@ def create_app(cfg: dict | None = None) -> FastAPI:
 
     @app.get("/api/tools")
     def get_tools():
+        from .core.tool_risk import get_tool_risk, risk_to_label
         return [{"id": name, "name": name,
                  "description": (fn.__doc__ or "").strip().split("\n")[0],
-                 "enabled": True}
+                 "enabled": True,
+                 "risk": get_tool_risk(name).value,
+                 "risk_label": risk_to_label(get_tool_risk(name))}
                 for name, fn in sorted(TOOL_REGISTRY.items())]
 
     # ── Memory ──────────────────────────────────────────────────
@@ -1212,7 +1286,8 @@ def create_app(cfg: dict | None = None) -> FastAPI:
                                 project_context = p.get("sharedContext", "")
                                 break
                     session.current_conv_id = conv_id
-                    session.start_run(content, attachments_meta, project_context)
+                    mode = msg.get("mode")
+                    session.start_run(content, attachments_meta, project_context, force_mode=mode)
                 elif mtype == "agent_config":
                     session.agent_config = {k: v for k, v in msg.items() if k not in ("type",)}
                     await ws.send_text(json.dumps({"type": "agent_config", **session.agent_config}))

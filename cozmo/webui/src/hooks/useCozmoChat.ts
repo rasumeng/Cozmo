@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Conversation, ActivityStep, WorkspaceMode, Attachment, Project, PlanData, TerminalEntry, DiffEntry, AgentTaskCreate, BackgroundRunInfo, BackgroundRunLog, ScheduledTaskInfo } from '@/types'
+import { Conversation, InlineStep, WorkspaceMode, Attachment, Project, PlanData, AgentTaskCreate, BackgroundRunInfo, BackgroundRunLog, ScheduledTaskInfo, AgentStateInfo, ProgressInfo } from '@/types'
 import { CozmoClient, ConnectionState, ServerEvent, fetchConversations, saveConversation, deleteConversationApi, fetchProjects, createProject, updateProject, deleteProjectApi, fetchProjectConversations } from '@/services/cozmo'
 
 export interface PermissionRequest {
@@ -20,11 +20,9 @@ export function useCozmoChat() {
   const [conversations, setConversations] = useState<Conversation[]>([])
   const [activeId, setActiveId] = useState(() => '')
   const [generating, setGenerating] = useState(false)
-  const [activity, setActivity] = useState<ActivityStep[]>([])
+  const [inlineSteps, setInlineSteps] = useState<InlineStep[]>([])
   const [permission, setPermission] = useState<PermissionRequest | null>(null)
   const [plan, setPlan] = useState<PlanData | null>(null)
-  const [terminalEntries, setTerminalEntries] = useState<TerminalEntry[]>([])
-  const [diffEntries, setDiffEntries] = useState<DiffEntry[]>([])
   const [currentDirectory, setCurrentDirectory] = useState('./')
   const [permissionMode, setPermissionMode] = useState('manual')
   const [recentConversations, setRecentConversations] = useState<{ id: string; title: string; mode: string; updatedAt: string }[]>([])
@@ -32,6 +30,8 @@ export function useCozmoChat() {
   const [backgroundRuns, setBackgroundRuns] = useState<BackgroundRunInfo[]>([])
   const [schedules, setSchedules] = useState<ScheduledTaskInfo[]>([])
   const [draftMode, setDraftMode] = useState<WorkspaceMode>('chat')
+  const [agentState, setAgentState] = useState<AgentStateInfo | null>(null)
+  const [progress, setProgress] = useState<ProgressInfo | null>(null)
   const [projects, setProjects] = useState<Project[]>([])
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null)
   const dirtyRef = useRef(false)
@@ -102,34 +102,90 @@ export function useCozmoChat() {
     dirtyRef.current = true
   }, [updateActive])
 
-  const detailFromLabel = (label: string): string | undefined => {
-    if (label.startsWith('Running:')) return `Executing ${label.slice(8).trim()}`
-    if (label.startsWith('Mode:')) return `Operating in ${label.slice(5).trim().split('—')[0].trim()} mode`
-    if (label === 'Searching...') return 'Searching the web for context'
-    if (label === 'Thinking...') return 'Processing tool results and forming response'
-    if (label === 'Routing...') return 'Routing request to best agent mode'
-    if (label.startsWith('Stopped')) return 'Generation was cancelled by the user'
-    return label
+  const toolLabel = (tool: string, args: Record<string, unknown>): string => {
+    const p = args['path'] as string | undefined
+    const q = args['query'] as string | undefined
+    const pt = args['pattern'] as string | undefined
+    const cmd = args['command'] as string | undefined
+    const url = args['url'] as string | undefined
+    switch (tool) {
+      case 'read': return `Reading ${p ?? 'file'}...`
+      case 'write_file': return `Writing ${p ?? 'file'}...`
+      case 'edit_file': return `Editing ${p ?? 'file'}...`
+      case 'glob': return `Finding files${pt ? `: ${pt}` : '...'}`
+      case 'grep': return `Searching code${q ? ` for "${q.slice(0, 40)}"` : '...'}`
+      case 'bash': return `Running${cmd ? `: ${cmd.slice(0, 50)}` : ' command...'}`
+      case 'search_web': return `Searching web${q ? ` for "${q.slice(0, 40)}"` : '...'}`
+      case 'web_fetch': return `Fetching ${url ?? 'page'}...`
+      default: return `${tool.replace(/_/g, ' ')}...`
+    }
   }
 
-  const pushActivity = useCallback((label: string, running = false, detail?: string, query?: string) => {
-    setActivity((steps) => {
-      // close out the previous running step
-      const closed = steps.map((s) =>
-        s.status === 'running' ? { ...s, status: 'completed' as const, durationMs: s.startedAt ? Date.now() - new Date(s.startedAt).getTime() : undefined } : s
+  const toolIcon = (tool: string): string => {
+    switch (tool) {
+      case 'read': case 'write_file': case 'edit_file': return 'FileText'
+      case 'glob': case 'grep': return 'Search'
+      case 'bash': return 'Terminal'
+      case 'search_web': case 'web_fetch': return 'Globe'
+      default: return 'Wrench'
+    }
+  }
+
+  const toolSummary = (tool: string, args: Record<string, unknown>): string | undefined => {
+    const p = args['path'] as string | undefined
+    const q = args['query'] as string | undefined
+    const pt = args['pattern'] as string | undefined
+    const cmd = args['command'] as string | undefined
+    const url = args['url'] as string | undefined
+    switch (tool) {
+      case 'read': return `Tool: read — Path: ${p ?? '?'}`
+      case 'write_file': return `Tool: write_file — Path: ${p ?? '?'}`
+      case 'edit_file': return `Tool: edit_file — Path: ${p ?? '?'}`
+      case 'bash': return `Tool: bash — ${cmd ?? '?'}`
+      case 'grep': return `Tool: grep — Pattern: ${q ?? pt ?? '?'}`
+      case 'glob': return `Tool: glob — Pattern: ${pt ?? '?'}`
+      case 'search_web': return `Tool: search_web — Query: ${q ?? '?'}`
+      case 'web_fetch': return `Tool: web_fetch — URL: ${url ?? '?'}`
+      default: return `Tool: ${tool}`
+    }
+  }
+
+  const pushStep = useCallback((step: {
+    type: 'thinking' | 'tool_call'
+    icon: string
+    label: string
+    detail?: string
+    query?: string
+    toolCallId?: string
+    toolName?: string
+    toolCategory?: string
+    toolSummary?: string
+    status: 'running' | 'completed' | 'error'
+  }) => {
+    setInlineSteps(prev => {
+      const now = Date.now()
+      const closed = prev.map(s =>
+        s.status === 'running' ? { ...s, status: 'completed' as const, durationMs: now - s.startedAt } : s
       )
-      return [
-        ...closed,
-        {
-          id: nextId(),
-          icon: label.startsWith('Running:') ? 'Terminal' : 'Brain',
-          label,
-          detail: detail ?? detailFromLabel(label),
-          query,
-          status: running ? ('running' as const) : ('completed' as const),
-          startedAt: now(),
-        },
-      ]
+      return [...closed, { ...step, id: nextId(), startedAt: now }]
+    })
+  }, [])
+
+  const pushReasoning = useCallback((text: string) => {
+    setInlineSteps(prev => {
+      const last = prev[prev.length - 1]
+      if (last && last.status === 'running' && last.icon === 'Brain' && last.label === 'Thinking...') {
+        return prev.map((s, i) =>
+          i === prev.length - 1
+            ? { ...s, detail: (s.detail || '') + text }
+            : s
+        )
+      }
+      const now = Date.now()
+      const closed: InlineStep[] = prev.map(s =>
+        s.status === 'running' ? { ...s, status: 'completed' as const, durationMs: now - s.startedAt } : s
+      )
+      return [...closed, { id: nextId(), type: 'thinking' as const, icon: 'Brain', label: 'Thinking...', detail: text, status: 'running' as const, startedAt: now }]
     })
   }, [])
 
@@ -140,36 +196,50 @@ export function useCozmoChat() {
           appendToken(ev.text)
           break
         case 'thinking':
-          pushActivity(ev.text, true, ev.detail, ev.query)
-          break
         case 'status':
-          pushActivity(ev.text, true, ev.detail, ev.query)
+          pushStep({
+            type: 'thinking',
+            icon: 'Brain',
+            label: ev.text,
+            detail: ev.detail,
+            query: ev.query,
+            status: 'running',
+          })
+          break
+        case 'reasoning':
+          pushReasoning(ev.text)
+          break
+        case 'agent_status':
+          pushStep({
+            type: 'thinking',
+            icon: 'Activity',
+            label: ev.text,
+            detail: ev.detail,
+            query: ev.query,
+            status: 'running',
+          })
           break
         case 'plan':
           setPlan({ plan: ev.plan, status: 'pending' })
           break
         case 'tool_call':
-          setTerminalEntries(prev => [...prev, {
-            id: ev.id, tool: ev.tool, args: ev.args, result: '', diff: undefined, timestamp: Date.now()
-          }])
-          if (ev.tool === 'edit_file' || ev.tool === 'write_file') {
-            const path = (ev.args as Record<string, unknown>).path as string || 'unknown'
-            setDiffEntries(prev => [...prev, {
-              id: ev.id, path, added: 0, removed: 0,
-              diff: { text: '', added: 0, removed: 0 },
-              timestamp: Date.now()
-            }])
-          }
+          pushStep({
+            type: 'tool_call',
+            icon: toolIcon(ev.tool),
+            label: toolLabel(ev.tool, ev.args),
+            toolCallId: ev.id,
+            toolName: ev.tool,
+            toolCategory: ev.category,
+            toolSummary: toolSummary(ev.tool, ev.args),
+            status: 'running',
+          })
           break
         case 'tool_result':
-          setTerminalEntries(prev => prev.map(e =>
-            e.id === ev.id ? { ...e, result: ev.result, diff: ev.diff } : e
+          setInlineSteps(prev => prev.map(s =>
+            s.toolCallId === ev.id
+              ? { ...s, status: 'completed' as const, durationMs: Date.now() - s.startedAt, result: ev.result, diff: ev.diff }
+              : s
           ))
-          if (ev.diff) {
-            setDiffEntries(prev => prev.map(e =>
-              e.id === ev.id ? { ...e, added: ev.diff!.added, removed: ev.diff!.removed, diff: ev.diff! } : e
-            ))
-          }
           break
         case 'directory_set':
           setCurrentDirectory(ev.path)
@@ -221,6 +291,17 @@ export function useCozmoChat() {
         case 'schedule_toggled':
           setSchedules(prev => prev.map(s => s.id === ev.schedule_id ? { ...s, enabled: ev.enabled } : s))
           break
+        case 'progress':
+          setProgress({ current: ev.current, total: ev.total, label: ev.label })
+          break
+        case 'agent_state':
+          setAgentState({
+            current_goal: ev.current_goal,
+            status: ev.status,
+            tools_used: ev.tools_used,
+            error: ev.error,
+          })
+          break
         case 'permission_request':
           setPermission({ tool: ev.tool, args: ev.args })
           break
@@ -229,19 +310,19 @@ export function useCozmoChat() {
           setGenerating(false)
           setPermission(null)
           setPlan(null)
-          setActivity((steps) =>
-            steps.map((s) =>
-              s.status === 'running' ? { ...s, status: 'completed' as const, durationMs: s.startedAt ? Date.now() - new Date(s.startedAt).getTime() : undefined } : s
-            )
-          )
+          setProgress(null)
+          setInlineSteps(prev => prev.map(s =>
+            s.status === 'running' ? { ...s, status: 'completed' as const, durationMs: Date.now() - s.startedAt } : s
+          ))
           break
         case 'error':
           appendToken(`\n\n**Error:** ${ev.text}`)
           setGenerating(false)
+          setProgress(null)
           break
       }
     },
-    [appendToken, pushActivity, finishStreaming]
+    [appendToken, pushStep, pushReasoning, finishStreaming]
   )
 
   const handleEventRef = useRef(handleEvent)
@@ -278,14 +359,14 @@ export function useCozmoChat() {
           mode: draftMode,
           messages: [{ id: nextId(), role: 'user', content: textToSend, createdAt: now(), attachments }],
         }
-        if (!client.sendChat(textToSend, newId, attachments, projectId)) return
+        if (!client.sendChat(textToSend, newId, attachments, projectId, draftMode)) return
         setConversations((convs) => [newConv, ...convs])
         setActiveId(newId)
         dirtyRef.current = true
-        setActivity([])
+        setInlineSteps([])
         setGenerating(true)
       } else {
-        if (!client.sendChat(textToSend, resolvedActiveId, attachments, projectId)) return
+        if (!client.sendChat(textToSend, resolvedActiveId, attachments, projectId, draftMode)) return
         updateActive((c) => ({
           ...c,
           title: c.messages.length === 0 ? (trimmed.slice(0, 48) || 'Attachments') : c.title,
@@ -296,7 +377,7 @@ export function useCozmoChat() {
           ],
         }))
         dirtyRef.current = true
-        setActivity([])
+        setInlineSteps([])
         setGenerating(true)
       }
     },
@@ -330,9 +411,7 @@ export function useCozmoChat() {
     clientRef.current?.setPermissionMode(mode)
   }, [])
 
-  const clearTerminal = useCallback(() => {
-    setTerminalEntries([])
-  }, [])
+
 
   const handleListProjects = useCallback((search?: string) => {
     clientRef.current?.listProjects(search)
@@ -389,9 +468,9 @@ export function useCozmoChat() {
     clientRef.current?.reset()
     setDraftMode(mode)
     setActiveId(DRAFT_ID)
-    setActivity([])
-    setTerminalEntries([])
-    setDiffEntries([])
+    setInlineSteps([])
+    setAgentState(null)
+    setProgress(null)
   }, [generating])
 
   const pinConversation = useCallback((id: string) => {
@@ -463,11 +542,11 @@ export function useCozmoChat() {
     activeId: resolvedActiveId,
     setActiveId,
     generating,
-    activity,
+    inlineSteps,
+    agentState,
+    progress,
     plan,
     permission,
-    terminalEntries,
-    diffEntries,
     currentDirectory,
     permissionMode,
     recentConversations,
@@ -492,7 +571,6 @@ export function useCozmoChat() {
     answerPermission,
     answerPlan,
     setDirectory,
-    clearTerminal,
     newChat,
     pinConversation,
     renameConversation,

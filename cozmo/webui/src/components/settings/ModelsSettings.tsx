@@ -49,7 +49,7 @@ export function ModelsSettings({ config, updateModel, ollamaModels, setConfig, s
       {lightweight && (
         <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-accent/10 border border-accent/30">
           <span className="text-xs text-accent font-medium">Lightweight mode active</span>
-          <span className="text-xs text-base-500">— all roles use openbmb/minicpm5</span>
+          <span className="text-xs text-base-500">— single model used for all roles</span>
         </div>
       )}
       <div className="space-y-2">
@@ -60,7 +60,7 @@ export function ModelsSettings({ config, updateModel, ollamaModels, setConfig, s
               <p className="text-xs text-base-500">{PRESET_META[role]?.desc ?? ''}</p>
             </div>
             <ModelSelect
-              value={lightweight ? 'openbmb/minicpm5' : String(config.models?.[role] ?? '')}
+              value={String(config.models?.[role] ?? '')}
               models={ollamaModels}
               onChange={(v) => updateModel(role, v)}
               disabled={lightweight}

@@ -1,7 +1,4 @@
-import { useState } from 'react'
 import { Bot, Thermometer, ListOrdered, MessageSquareText } from 'lucide-react'
-import { ModelSelect } from './ModelSelect'
-import { fetchOllamaModels } from './api'
 import type { SettingsData } from './types'
 import type { AgentConfig } from '@/types'
 
@@ -12,36 +9,18 @@ interface Props {
 }
 
 export function AgentSettings({ config, setConfig, setDirty }: Props) {
-  const [ollamaModels, setOllamaModels] = useState<string[]>([])
-  const [loadingModels, setLoadingModels] = useState(false)
-
   const agentCfg: AgentConfig = {
-    model: (config?.models as Record<string, string>)?.['agent'] ?? '',
     system_prompt: (config as any)?.agent?.system_prompt ?? '',
     max_steps: (config as any)?.agent?.max_steps ?? 10,
     temperature: (config as any)?.agent?.temperature ?? 0.2,
   }
 
-  const loadModels = () => {
-    if (ollamaModels.length > 0 || loadingModels) return
-    setLoadingModels(true)
-    fetchOllamaModels().then((models) => {
-      setOllamaModels(models)
-      setLoadingModels(false)
-    }).catch(() => setLoadingModels(false))
-  }
+  const agentModel = (config?.models as Record<string, string>)?.['agent'] ?? ''
 
   const updateAgent = (patch: Partial<AgentConfig>) => {
     if (!config) return
     const agent = { ...((config as any).agent ?? {}), ...patch }
     setConfig({ ...config, agent } as SettingsData)
-    setDirty(true)
-  }
-
-  const updateModel = (model: string) => {
-    if (!config) return
-    const models = { ...(config.models as Record<string, string>), agent: model }
-    setConfig({ ...config, models: models as Record<string, unknown> } as SettingsData)
     setDirty(true)
   }
 
@@ -55,16 +34,14 @@ export function AgentSettings({ config, setConfig, setDirty }: Props) {
             <Bot size={14} className="text-accent" />
             <div>
               <p className="text-sm text-base-100 font-medium">Agent Model</p>
-              <p className="text-xs text-base-500">Model used for agent mode tasks</p>
+              <p className="text-xs text-base-500">
+                {agentModel
+                  ? `Using "${agentModel}" — change in Models tab`
+                  : 'No model set — configure in Models tab'}
+              </p>
             </div>
           </div>
-          <div className="w-44" onFocus={loadModels}>
-            <ModelSelect
-              value={agentCfg.model ?? ''}
-              models={ollamaModels}
-              onChange={updateModel}
-            />
-          </div>
+          <span className="text-xs text-base-400 font-mono">{agentModel || '—'}</span>
         </div>
 
         <div className="p-3 rounded-xl bg-base-800/50 border border-base-700">
