@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.3.0 (unreleased)
+
+### Agent Events (WebSocket — new backend events for activity panel)
+
+- Tool category mapping (`_TOOL_CATEGORIES`) in `runtime.py` — tools tagged as `workspace`, `python`, `web`, `git`, `memory`, or `other`
+- `tool_call` yields include `category` field for grouped display in activity panel
+- `plan` event now includes structured `steps` array (`{id, description, tool, depends_on, status}`) when `AgentRuntime` provides a `Plan`
+- New `progress` event `{current, total, label}` emitted each step during agent execution
+- New `agent_state` event `{current_goal, status, tools_used, error?}` emitted at: plan approve, tool record, completion, error
+- All new events forwarded through `webui_server.py` WebSocket handler
+- Background run handler gracefully ignores `progress` / `agent_state` tuples
+
+### Frontend Types & Hooks
+
+- Added `AgentStateInfo`, `ProgressInfo`, `PlanStepInfo` types
+- Updated `ServerEvent` union with `progress`, `agent_state`, `category` on `tool_call`, `steps` on `plan`
+- `useCozmoChat` now exposes `agentState` and `progress` state objects
+- `pushStep` accepts `toolCategory` field
+- `handleEvent` clears `progress` on `done` / `error` / `newChat`
+
 ## v0.2.0 (unreleased)
 
 ### UI Architecture
@@ -7,12 +27,12 @@
 - Removed right-side panels: ActivityPanel, RightPanel, ActivityCard, StatusIndicator, TerminalPanel, DiffPanel, FileChangeCard
 - Trace now renders inline between user/assistant messages
 - Thinking bubble with pulsing dots persists across mode switches
-- Conversation component shared via BaseConversation pattern across Chat/Agent/Code
+- Conversation component shared across Chat/Agent/Code modes
 
 ### Streaming Pipeline
 - Removed `{` suppression in runtime.py
-- Reasoning token capture via reasoning=True on ChatOllama
-- Chat handler yields (kind, text) tuples for unified event processing
+- Reasoning token capture via `reasoning=True` on ChatOllama
+- Chat handler yields `(kind, text)` tuples for unified event processing
 - Reasoning and agent_status handlers in frontend WebSocket client
 - Plan events properly wired through webui_server.py
 
@@ -25,19 +45,6 @@
 - Fixed ModelSelect width (w-48 → min-w-[180px])
 - Fixed CSS typo in ConnectorsSection (border-accept/40 → border-accent/40)
 - Expanded SettingsData type with RuntimeConfig, AgentConfig, McpServerConfig
-
-### Agent Events (WebSocket)
-- Tool category mapping: workspace/python/web/git/memory/other in tool_call events
-- Structured plan steps alongside free-text plan for rich plan display
-- Progress event (current, total, label) during agent step execution
-- Agent state event (current_goal, status, tools_used) at lifecycle transitions
-- All new events wired through webui_server.py → frontend ServerEvent type
-
-### Frontend Types & Hooks
-- Added AgentStateInfo, ProgressInfo, PlanStepInfo types
-- Updated ServerEvent union with progress, agent_state, tool_call.category, plan.steps
-- useCozmoChat exposes agentState and progress state
-- Handlers for all new event types
 
 ## v0.1.0 (unreleased)
 
