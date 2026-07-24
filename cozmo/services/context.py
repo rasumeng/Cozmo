@@ -1,0 +1,182 @@
+"""
+CozmoContext — composition root / dependency container.
+
+Phase 0: establishes shared initialization that was previously
+duplicated across cli.py, webui_server.py, and telegram entry point.
+
+Phase B: ModelService replaces ModelManager for CLI entry points.
+WebUI still uses ModelManager directly (migrated in later phase).
+
+Wires services together but contains NO business logic, routing,
+or model selection behavior.
+"""
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+from typing import Optional
+
+from .. import config as cozmo_config
+
+log = logging.getLogger("cozmo.context")
+
+
+class CozmoContext:
+    """Application composition root.
+
+    Lazily initializes shared services on first access.
+    All entry points (CLI, WebUI, Telegram) consume the same wiring.
+
+    Usage:
+        ctx = CozmoContext()
+        runtime = ctx.create_runtime()
+        runtime.run("hello")
+    """
+
+    def __init__(self, cfg: dict | None = None):
+        self._cfg: dict | None = cfg
+        self._ollama_url: str | None = None
+        self._model_service: object | None = None
+        self._router_llm: object | None = None
+        self._memory: object | None = None
+        self._project_index: object | None = None
+        self._scheduler: object | None = None
+        self._embedding: object | None = None
+        self._reranker: object | None = None
+        self._knowledge_inited: bool = False
+
+    # ── config ──────────────────────────────────────────────────────────
+
+    @property
+    def config(self) -> dict:
+        if self._cfg is None:
+            self._cfg = cozmo_config.load()
+        return self._cfg
+
+    # ── provider wiring (Phase B: ModelService replaces ModelManager) ───
+
+    @property
+    def ollama_url(self) -> str:
+        return self.config.get("ollama", {}).get("url", "http://localhost:11434")
+
+    @property
+    def model_registry(self):
+        from ..models import ModelRegistry
+
+        if not hasattr(self, "_model_registry"):
+            self._model_registry = ModelRegistry()
+        return self._model_registry
+
+    @property
+    def model_service(self):
+        from ..models import ModelService
+
+        if self._model_service is None:
+            svc = ModelService(self.config, self.model_registry)
+            svc.refresh()
+            self._model_service = svc
+        return self._model_service
+
+    @property
+    def embedding_service(self):
+        from .embedding import EmbeddingService
+
+        if self._embedding is None:
+            self._embedding = EmbeddingService(self.config)
+        return self._embedding
+
+    @property
+    def reranker_service(self):
+        from .embedding import RerankerService
+
+        if self._reranker is None:
+            self._reranker = RerankerService(self.config)
+        return self._reranker
+
+    @property
+    def installed_models(self) -> list[str]:
+        return [m.name for m in self.model_registry.list_all()]
+
+    @property
+    def router_llm(self):
+        """Lightweight wrapper around ModelService for intent classification & summarization.
+
+        Provides the simple `invoke(prompt) -> str` API that `classify_intent`
+        and history compaction expect.
+        """
+        from ..runtime.runtime import _RouterLLM
+        if self._router_llm is None:
+            self._router_llm = _RouterLLM(self.model_service, "chat")
+        return self._router_llm
+
+    @property
+    def memory(self):
+        from ..memory.manager import MemoryManager
+
+        if self._memory is None:
+            self._memory = MemoryManager(
+                self.router_llm,
+                persist_dir=str(Path.home() / ".cozmo" / "memory"),
+            )
+        return self._memory
+
+    @property
+    def project_index(self):
+        from ..code_indexer import ProjectIndex
+
+        if self._project_index is None:
+            self._project_index = ProjectIndex(Path.cwd())
+        return self._project_index
+
+    @property
+    def scheduler(self):
+        from ..scheduler import Scheduler
+        from ..tools.scheduler_task import init_scheduler_tool
+
+        if self._scheduler is None:
+            self._scheduler = Scheduler()
+            self._scheduler.on_trigger = lambda s: None
+            self._scheduler.start()
+            init_scheduler_tool(self._scheduler)
+        return self._scheduler
+
+    # ── lifecycle ───────────────────────────────────────────────────────
+
+    def init_knowledge_index(self):
+        from ..memory.knowledge_index import init_knowledge_index
+
+        if not self._knowledge_inited:
+            init_knowledge_index(
+                knowledge_dir=self.config.get("knowledge_dir", "./knowledge"),
+                persist_dir=str(Path.home() / ".cozmo" / "knowledge_index"),
+            )
+            self._knowledge_inited = True
+
+    def create_runtime(self, **overrides) -> object:
+        from ..runtime.runtime import CozmoRuntime
+        from ..runtime.event_bus import EventBus
+
+        runtime = CozmoRuntime(
+            model_service=overrides.get("model_service", self.model_service),
+            model_manager=overrides.get("model_manager", None),
+            memory=overrides.get("memory", self.memory),
+            project_index=overrides.get("project_index", self.project_index),
+            cfg=overrides.get("cfg", self.config),
+            router_llm=overrides.get("router_llm", self.router_llm),
+            event_bus=overrides.get("event_bus", EventBus()),
+            skills=overrides.get("skills", None),
+            registry=overrides.get("registry", None),
+        )
+        return runtime
+
+    def warmup(self):
+        """Eagerly initialize all services. Called at startup."""
+        _ = self.model_service
+        _ = self.router_llm
+        _ = self.memory
+        _ = self.project_index
+        _ = self.embedding_service
+        self.init_knowledge_index()
+        _ = self.scheduler
+        log.info("CozmoContext: all services initialized")

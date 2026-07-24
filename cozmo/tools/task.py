@@ -125,17 +125,20 @@ def task(description: str, prompt: str, subagent_type: str = "general",
 
     _SUBAGENT_DEPTH.depth = depth + 1
     try:
-        from ..core.runtime import CozmoRuntime
-        from ..core.model_manager import ModelManager
+        from ..runtime.runtime import CozmoRuntime
+        from ..models import ModelService, ModelRegistry
         from ..config import load_config
-        from ..core.tool_registry import ToolRegistry
+        from ..runtime.tool_registry import ToolRegistry
 
         cfg = load_config()
-        ollama_url = cfg.get("ollama", {}).get("url", "http://localhost:11434")
-        mm = ModelManager(ollama_url, cfg.get("models", {}),
-                          providers_cfg=cfg.get("providers", {}))
+        model_registry = ModelRegistry()
+        model_service = ModelService(cfg, model_registry)
+        model_service.refresh()
+
         if agent_cfg.get("model"):
-            mm.set_override("agent", agent_cfg["model"])
+            force_model = agent_cfg["model"]
+        else:
+            force_model = ""
 
         registry = ToolRegistry()
         from ..tools import TOOL_REGISTRY
@@ -143,11 +146,12 @@ def task(description: str, prompt: str, subagent_type: str = "general",
             registry.register(name, fn)
 
         sub_runtime = CozmoRuntime(
-            model_manager=mm,
+            model_service=model_service,
             memory=None,
             registry=registry,
             cfg=cfg,
         )
+        sub_runtime.force_model = force_model
 
         system_parts = [agent_cfg.get("system", "")]
         if agent_cfg.get("permissions"):

@@ -11,7 +11,8 @@ log = logging.getLogger("cozmo.search")
 
 
 def _search_searxng(query: str, max_results: int = 5, timelimit: str = None) -> list[dict]:
-    """Search using SearXNG. Returns list of {title, url, snippet} dicts or empty list."""
+    if not query or not query.strip():
+        return []
     try:
         from ..searxng_util import ensure_searxng
         searxng_url = ensure_searxng()

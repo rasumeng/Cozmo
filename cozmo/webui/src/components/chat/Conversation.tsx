@@ -1,13 +1,22 @@
 import { useEffect, useRef, useState } from 'react'
 import { motion } from 'framer-motion'
 import { Sparkles } from 'lucide-react'
-import { Conversation as ConversationType, Attachment, Project, AgentTaskFile, InlineStep, PlanData } from '@/types'
+import { Conversation as ConversationType, Attachment, InlineStep, PlanData, AgentStateInfo, ProgressInfo, Project, BackgroundRunInfo } from '@/types'
 import { ConnectionState } from '@/services/cozmo'
 import type { SectionId } from '@/components/settings/SettingsModal'
 import { MessageBubble } from './MessageBubble'
 import { InlineTraceTimeline } from './InlineTraceTimeline'
+import { InlinePermissionCard } from './InlinePermissionCard'
+import { ActivityPanel } from './ActivityPanel'
+import { ProjectContextBar } from './ProjectContextBar'
+import { NotificationBell } from './NotificationBell'
 import { PromptInput } from './PromptInput'
 import { LandingPage } from './LandingPage'
+
+interface PermissionRequest {
+  tool: string
+  args: Record<string, unknown>
+}
 
 interface Props {
   conversation: ConversationType
@@ -15,27 +24,17 @@ interface Props {
   generating: boolean
   inlineSteps: InlineStep[]
   plan: PlanData | null
+  permission: PermissionRequest | null
+  agentState: AgentStateInfo | null
+  progress: ProgressInfo | null
+  activeProject: Project | null
+  backgroundRuns: BackgroundRunInfo[]
   onSend: (content: string, attachments?: Attachment[]) => void
   onStop: () => void
   onApprovePlan: () => void
   onRejectPlan: () => void
-  activeConversationId?: string
-  projects?: Project[]
-  onAddToProject?: (convId: string, projId: string) => void
-  onOpenProjectPanel?: () => void
+  onAnswerPermission: (allowed: boolean) => void
   onOpenSettings?: (section: SectionId) => void
-  onCreateSkillTrigger?: () => void
-  pendingSkillTrigger?: boolean
-  onConsumeSkillTrigger?: () => void
-  currentDirectory?: string
-  onSetDirectory?: (path: string) => void
-  permissionMode?: string
-  onSetPermissionMode?: (mode: string) => void
-  agentTask?: Project | null
-  onListProjects?: (search?: string) => void
-  onSelectProject?: (id: string) => void
-  onCreateTask?: (data: { name: string; description: string; instructions: string; files: AgentTaskFile[]; location: string }) => void
-  onImportChat?: (ids: string[]) => void
 }
 
 const CONNECTION_LABEL: Record<ConnectionState, { text: string; dot: string }> = {
@@ -50,30 +49,29 @@ export function Conversation({
   generating,
   inlineSteps,
   plan,
+  permission,
+  agentState,
+  progress,
+  activeProject,
+  backgroundRuns,
   onSend,
   onStop,
   onApprovePlan,
   onRejectPlan,
-  activeConversationId,
-  projects,
-  onAddToProject,
-  onOpenProjectPanel,
+  onAnswerPermission,
   onOpenSettings,
-  onCreateSkillTrigger,
-  pendingSkillTrigger,
-  onConsumeSkillTrigger,
-  currentDirectory,
-  onSetDirectory,
-  permissionMode,
-  onSetPermissionMode,
-  agentTask,
-  onListProjects,
-  onSelectProject,
-  onCreateTask,
-  onImportChat,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const [suggestionText, setSuggestionText] = useState('')
+  const [activityOpen, setActivityOpen] = useState(() => {
+    try { return localStorage.getItem('cozmo_activity_panel') === 'true' } catch { return false }
+  })
+
+  const toggleActivity = () => {
+    const next = !activityOpen
+    setActivityOpen(next)
+    try { localStorage.setItem('cozmo_activity_panel', String(next)) } catch {}
+  }
 
   // stick to bottom as tokens stream in
   useEffect(() => {
@@ -84,6 +82,7 @@ export function Conversation({
   const conn = CONNECTION_LABEL[connection]
 
   return (
+    <div className="flex-1 flex min-w-0">
     <main className="flex-1 flex flex-col min-w-0 bg-base-950">
       <header className="h-14 shrink-0 flex items-center justify-between px-5 border-b border-base-800">
         <div className="flex items-center gap-2.5 text-sm text-base-300">
@@ -92,18 +91,21 @@ export function Conversation({
           </div>
           <span className="text-base-100 font-medium">{conversation.title}</span>
         </div>
-        <div className="flex items-center gap-3">
-          <div className="flex items-center gap-1.5 text-[11px] text-base-500">
+        <div className="flex items-center gap-1">
+          <NotificationBell runs={backgroundRuns} />
+          <div className="flex items-center gap-1.5 text-[11px] text-base-500 ml-1">
             <span className={`w-1.5 h-1.5 rounded-full ${conn.dot}`} />
             {conn.text}
           </div>
         </div>
       </header>
 
+      <ProjectContextBar project={activeProject} />
+
       <div ref={scrollRef} className="flex-1 overflow-y-auto">
         <div className="max-w-3xl mx-auto px-6 py-8 space-y-6">
           {conversation.messages.length === 0 ? (
-            <LandingPage mode={conversation.mode} onSuggestion={setSuggestionText} />
+            <LandingPage onSuggestion={setSuggestionText} />
           ) : (
             conversation.messages.map((m, i, arr) => (
               <div key={m.id}>
@@ -132,6 +134,11 @@ export function Conversation({
                         generating={generating}
                       />
                     )}
+                    {permission && (
+                      <div className="mt-3">
+                        <InlinePermissionCard request={permission} onAnswer={onAnswerPermission} />
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -147,28 +154,21 @@ export function Conversation({
             disabled={connection !== 'open'}
             onSend={(content, attachments) => { setSuggestionText(''); onSend(content, attachments) }}
             onStop={onStop}
-            activeConversationId={activeConversationId}
-            mode={conversation.mode}
-            projects={projects}
-            onAddToProject={onAddToProject}
-            onOpenProjectPanel={onOpenProjectPanel}
             onOpenSettings={onOpenSettings}
-            onCreateSkillTrigger={onCreateSkillTrigger}
-            pendingSkillTrigger={pendingSkillTrigger}
-            onConsumeSkillTrigger={onConsumeSkillTrigger}
             suggestion={suggestionText}
-            currentDirectory={currentDirectory}
-            onSetDirectory={onSetDirectory}
-            permissionMode={permissionMode}
-            onSetPermissionMode={onSetPermissionMode}
-            agentTask={agentTask}
-            onListProjects={onListProjects}
-            onSelectProject={onSelectProject}
-            onCreateTask={onCreateTask}
-            onImportChat={onImportChat}
           />
         </div>
       </div>
     </main>
+      <ActivityPanel
+        open={activityOpen}
+        onToggle={toggleActivity}
+        generating={generating}
+        inlineSteps={inlineSteps}
+        agentState={agentState}
+        progress={progress}
+        activeProject={activeProject}
+      />
+    </div>
   )
 }

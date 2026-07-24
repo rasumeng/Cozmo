@@ -1,6 +1,7 @@
+from . import config as cozmo_config
 from pathlib import Path
-from sentence_transformers import SentenceTransformer
 from .memory.lancedb_store import LanceStore
+from .services import EmbeddingService
 
 IGNORE_DIRS = {".git", "__pycache__", "node_modules", ".venv", "venv", ".cozmo", "target", "build", "dist"}
 
@@ -11,18 +12,24 @@ class ProjectIndex:
     Indexes project files as chunked documents for semantic code search.
     """
 
-    def __init__(self, project_root: str | Path, embed_model: str = "all-MiniLM-L6-v2"):
+    def __init__(self, project_root: str | Path, embed_model: str | EmbeddingService | None = None):
         self.root = Path(project_root).resolve()
-        self._embedder = SentenceTransformer(embed_model)
+
+        if isinstance(embed_model, EmbeddingService):
+            embed_service = embed_model
+        else:
+            cfg = cozmo_config.load()
+            model_name = embed_model or cfg.get("embedding", {}).get("model", "all-MiniLM-L6-v2")
+            embed_service = EmbeddingService({"embedding": {"model": model_name}})
 
         def embed(text: str) -> list[float]:
-            return self._embedder.encode(text, normalize_embeddings=True).tolist()
+            return embed_service.encode(text, normalize=True)
 
         self.store = LanceStore(
             uri=str(self.root / ".cozmo" / "project_index"),
             table_name="project_index",
             embed_func=embed,
-            embed_dim=self._embedder.get_sentence_embedding_dimension() or 384,
+            embed_dim=embed_service.dimension,
         )
 
     def index_all(self):

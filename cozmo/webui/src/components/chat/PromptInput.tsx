@@ -1,11 +1,7 @@
 import { useEffect, useState, useRef, useCallback } from 'react'
-import { Paperclip, ArrowUp, Square, Mic, Plus, Folder, Puzzle, Cable, X, ChevronRight, Settings, FolderOpen } from 'lucide-react'
-import { Attachment, Project, Skill, WorkspaceMode, AgentTaskFile } from '@/types'
-import { fetchSkills } from '@/services/cozmo'
+import { Paperclip, ArrowUp, Square, Mic, Plus, Folder, X } from 'lucide-react'
+import { Attachment } from '@/types'
 import type { SectionId } from '@/components/settings/SettingsModal'
-import { DirectoryPicker } from './DirectoryPicker'
-import { PermissionModeSelector } from './PermissionModeSelector'
-import { AgentTaskPopup } from './AgentTaskPopup'
 
 const API_BASE = import.meta.env.DEV ? 'http://localhost:8765' : ''
 
@@ -54,25 +50,8 @@ interface Props {
   disabled: boolean
   onSend: (content: string, attachments?: Attachment[]) => void
   onStop: () => void
-  activeConversationId?: string
-  mode?: WorkspaceMode
-  projects?: Project[]
-  onAddToProject?: (convId: string, projId: string) => void
-  onOpenProjectPanel?: () => void
   onOpenSettings?: (section: SectionId) => void
-  onCreateSkillTrigger?: () => void
-  pendingSkillTrigger?: boolean
-  onConsumeSkillTrigger?: () => void
   suggestion?: string
-  currentDirectory?: string
-  onSetDirectory?: (path: string) => void
-  permissionMode?: string
-  onSetPermissionMode?: (mode: string) => void
-  agentTask?: Project | null
-  onListProjects?: (search?: string) => void
-  onSelectProject?: (id: string) => void
-  onCreateTask?: (data: { name: string; description: string; instructions: string; files: AgentTaskFile[]; location: string }) => void
-  onImportChat?: (ids: string[]) => void
 }
 
 export function PromptInput({
@@ -80,30 +59,11 @@ export function PromptInput({
   disabled,
   onSend,
   onStop,
-  activeConversationId,
-  mode = 'chat',
-  projects = [],
-  onAddToProject,
-  onOpenProjectPanel,
   onOpenSettings,
-  onCreateSkillTrigger,
-  pendingSkillTrigger,
-  onConsumeSkillTrigger,
   suggestion,
-  currentDirectory,
-  onSetDirectory,
-  permissionMode,
-  onSetPermissionMode,
-  agentTask,
-  onListProjects,
-  onSelectProject,
-  onCreateTask,
-  onImportChat,
 }: Props) {
   const [value, setValue] = useState('')
   const [menuOpen, setMenuOpen] = useState(false)
-  const [activeSubmenu, setActiveSubmenu] = useState<string | null>(null)
-  const [showTaskPopup, setShowTaskPopup] = useState(false)
   const [micState, setMicState] = useState<'idle' | 'listening' | 'recording'>('idle')
   const micStateRef = useRef<'idle' | 'listening' | 'recording'>('idle')
   const recognitionRef = useRef<SpeechRecognition | null>(null)
@@ -112,12 +72,11 @@ export function PromptInput({
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const folderInputRef = useRef<HTMLInputElement>(null)
   const valueRef = useRef('')
   const prefixRef = useRef('')
   const [attachments, setAttachments] = useState<Attachment[]>([])
   const [uploading, setUploading] = useState(false)
-  const [skills, setSkills] = useState<Skill[]>([])
-  const submenuTimerRef = useRef<number | null>(null)
 
   const transcribeAudio = useCallback(async (blob: Blob): Promise<string | null> => {
     const form = new FormData()
@@ -313,27 +272,11 @@ export function PromptInput({
     const close = (e: MouseEvent) => {
       if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
         setMenuOpen(false)
-        setActiveSubmenu(null)
       }
     }
     document.addEventListener('mousedown', close)
     return () => document.removeEventListener('mousedown', close)
   }, [menuOpen])
-
-  useEffect(() => {
-    fetchSkills().then(setSkills).catch(() => {})
-  }, [])
-
-  useEffect(() => {
-    if (pendingSkillTrigger) {
-      setValue((prev) => {
-        const prefix = prev ? prev + ' ' : ''
-        return prefix + '@skill skill-creator'
-      })
-      onConsumeSkillTrigger?.()
-      textareaRef.current?.focus()
-    }
-  }, [pendingSkillTrigger, onConsumeSkillTrigger])
 
   useEffect(() => {
     if (suggestion) {
@@ -361,6 +304,16 @@ export function PromptInput({
     setValue('')
     setAttachments([])
   }
+
+  const handleAttachFolder = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files
+    if (!files || files.length === 0) return
+    const dirName = files[0].webkitRelativePath?.split('/')[0]
+    if (dirName) {
+      onSend(`/workspace ${dirName}`)
+    }
+    e.target.value = ''
+  }, [onSend])
 
   return (
     <div className="rounded-2xl border border-base-700 bg-base-900 shadow-panel focus-within:border-base-600 transition-colors">
@@ -411,146 +364,19 @@ export function PromptInput({
               <Plus size={16} />
             </button>
             {menuOpen && (
-              <div
-                className="absolute bottom-full mb-1 left-0 bg-base-850 border border-base-700 rounded-xl overflow-visible shadow-panel min-w-[180px] z-10 py-1"
-                onMouseLeave={() => setActiveSubmenu(null)}
-              >
+              <div className="absolute bottom-full mb-1 left-0 bg-base-850 border border-base-700 rounded-xl overflow-hidden shadow-panel min-w-[190px] z-10 py-1">
                 <button
                   onClick={() => { setMenuOpen(false); fileInputRef.current?.click() }}
                   className="w-full flex items-center gap-2 px-3 py-2 text-xs text-base-200 hover:bg-base-800 transition-colors"
                 >
                   <Paperclip size={13} /> Attach files or photos
                 </button>
-
-                <div
-                  className="relative"
-                  onMouseEnter={() => { if (submenuTimerRef.current) clearTimeout(submenuTimerRef.current); setActiveSubmenu('project') }}
-                  onMouseLeave={() => { submenuTimerRef.current = window.setTimeout(() => setActiveSubmenu(null), 150) }}
+                <button
+                  onClick={() => { setMenuOpen(false); folderInputRef.current?.click() }}
+                  className="w-full flex items-center gap-2 px-3 py-2 text-xs text-base-200 hover:bg-base-800 transition-colors"
                 >
-                  <button className="w-full flex items-center gap-2 px-3 py-2 text-xs text-base-200 hover:bg-base-800 transition-colors">
-                    <Folder size={13} /> Add to project <ChevronRight size={12} className="ml-auto" />
-                  </button>
-                  {activeSubmenu === 'project' && (
-                    <div
-                      className="absolute left-full top-0 bg-base-850 border border-base-700 rounded-xl overflow-hidden shadow-panel min-w-[170px] z-20 py-1"
-                      onMouseEnter={() => { if (submenuTimerRef.current) clearTimeout(submenuTimerRef.current); setActiveSubmenu('project') }}
-                      onMouseLeave={() => { submenuTimerRef.current = window.setTimeout(() => setActiveSubmenu(null), 150) }}
-                    >
-                      {projects.length === 0 ? (
-                        <div className="px-3 py-2 text-xs text-base-500">No projects yet</div>
-                      ) : (
-                        projects.map((p) => (
-                          <button
-                            key={p.id}
-                            onClick={() => {
-                              if (activeConversationId && onAddToProject) {
-                                onAddToProject(activeConversationId, p.id)
-                              }
-                              setMenuOpen(false)
-                              setActiveSubmenu(null)
-                            }}
-                            className="w-full flex items-center gap-2 px-3 py-2 text-xs text-base-200 hover:bg-base-800 transition-colors text-left"
-                          >
-                            <Folder size={12} className="text-accent shrink-0" />
-                            <span className="truncate">{p.name}</span>
-                          </button>
-                        ))
-                      )}
-                      <div className="border-t border-base-700 my-1" />
-                      <button
-                        onClick={() => {
-                          setMenuOpen(false)
-                          setActiveSubmenu(null)
-                          onOpenProjectPanel?.()
-                        }}
-                        className="w-full flex items-center gap-2 px-3 py-2 text-xs text-accent hover:bg-base-800 transition-colors"
-                      >
-                        <Plus size={12} /> Start a new project
-                      </button>
-                    </div>
-                  )}
-                </div>
-
-                <div className="border-t border-base-700 my-1" />
-
-                <div
-                  className="relative"
-                  onMouseEnter={() => { if (submenuTimerRef.current) clearTimeout(submenuTimerRef.current); setActiveSubmenu('skills') }}
-                  onMouseLeave={() => { submenuTimerRef.current = window.setTimeout(() => setActiveSubmenu(null), 150) }}
-                >
-                  <button className="w-full flex items-center gap-2 px-3 py-2 text-xs text-base-200 hover:bg-base-800 transition-colors">
-                    <Puzzle size={13} /> Skills <ChevronRight size={12} className="ml-auto" />
-                  </button>
-                  {activeSubmenu === 'skills' && (
-                    <div
-                      className="absolute left-full top-0 bg-base-850 border border-base-700 rounded-xl overflow-hidden shadow-panel min-w-[170px] z-20 py-1"
-                      onMouseEnter={() => { if (submenuTimerRef.current) clearTimeout(submenuTimerRef.current); setActiveSubmenu('skills') }}
-                      onMouseLeave={() => { submenuTimerRef.current = window.setTimeout(() => setActiveSubmenu(null), 150) }}
-                    >
-                      {skills.length === 0 ? (
-                        <div className="px-3 py-2 text-xs text-base-500">No skills installed</div>
-                      ) : (
-                        skills.map((s) => (
-                          <button
-                            key={s.name}
-                            onClick={() => {
-                              setValue((prev) => prev + (prev ? ' ' : '') + `@skill ${s.name}`)
-                              setMenuOpen(false)
-                              setActiveSubmenu(null)
-                            }}
-                            className="w-full flex items-center gap-2 px-3 py-2 text-xs text-base-200 hover:bg-base-800 transition-colors text-left"
-                          >
-                            <Puzzle size={12} className="text-base-400 shrink-0" />
-                            <span className="truncate">{s.name}</span>
-                          </button>
-                        ))
-                      )}
-                      <div className="border-t border-base-700 my-1" />
-                      <button
-                        onClick={() => {
-                          setMenuOpen(false)
-                          setActiveSubmenu(null)
-                          onOpenSettings?.('skills')
-                        }}
-                        className="w-full flex items-center gap-2 px-3 py-2 text-xs text-base-300 hover:bg-base-800 transition-colors"
-                      >
-                        <Settings size={12} /> Manage skills
-                      </button>
-                    </div>
-                  )}
-                </div>
-
-                <div
-                  className="relative"
-                  onMouseEnter={() => { if (submenuTimerRef.current) clearTimeout(submenuTimerRef.current); setActiveSubmenu('connectors') }}
-                  onMouseLeave={() => { submenuTimerRef.current = window.setTimeout(() => setActiveSubmenu(null), 150) }}
-                >
-                  <button className="w-full flex items-center gap-2 px-3 py-2 text-xs text-base-200 hover:bg-base-800 transition-colors">
-                    <Cable size={13} /> Connectors <ChevronRight size={12} className="ml-auto" />
-                  </button>
-                  {activeSubmenu === 'connectors' && (
-                    <div
-                      className="absolute left-full top-0 bg-base-850 border border-base-700 rounded-xl overflow-hidden shadow-panel min-w-[170px] z-20 py-1"
-                      onMouseEnter={() => { if (submenuTimerRef.current) clearTimeout(submenuTimerRef.current); setActiveSubmenu('connectors') }}
-                      onMouseLeave={() => { submenuTimerRef.current = window.setTimeout(() => setActiveSubmenu(null), 150) }}
-                    >
-                      <div className="px-3 py-2 text-xs text-base-500">
-                        Manage MCP server connections
-                      </div>
-                      <div className="border-t border-base-700 my-1" />
-                      <button
-                        onClick={() => {
-                          setMenuOpen(false)
-                          setActiveSubmenu(null)
-                          onOpenSettings?.('connectors')
-                        }}
-                        className="w-full flex items-center gap-2 px-3 py-2 text-xs text-base-300 hover:bg-base-800 transition-colors"
-                      >
-                        <Settings size={12} /> Manage connectors
-                      </button>
-                    </div>
-                  )}
-                </div>
+                  <Folder size={13} /> Attach folder
+                </button>
               </div>
             )}
           </div>
@@ -561,6 +387,13 @@ export function PromptInput({
             accept="image/*,.pdf,.txt,.py,.js,.ts,.md,.json,.csv,.docx,.xlsx"
             className="hidden"
             onChange={handleFileSelect}
+          />
+          <input
+            ref={folderInputRef}
+            type="file"
+            {...({ webkitdirectory: '' } as any)}
+            className="hidden"
+            onChange={handleAttachFolder}
           />
           <button
             onClick={toggleMic}
@@ -579,35 +412,6 @@ export function PromptInput({
               <span className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-red-400" />
             )}
           </button>
-          {mode === 'code' && onSetDirectory && (
-            <DirectoryPicker path={currentDirectory || './'} onChange={onSetDirectory} />
-          )}
-          {mode === 'code' && onSetPermissionMode && (
-            <PermissionModeSelector mode={permissionMode || 'manual'} onChange={onSetPermissionMode} />
-          )}
-          {mode === 'agent' && onListProjects && (
-            <div className="relative">
-              <button
-                onClick={() => setShowTaskPopup(v => !v)}
-                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-medium text-base-300 hover:bg-base-800 hover:text-base-100 transition-colors"
-              >
-                <FolderOpen size={13} />
-                {agentTask ? agentTask.name : 'No Task'}
-              </button>
-              {showTaskPopup && (
-                <AgentTaskPopup
-                  agentTask={agentTask || null}
-                  projects={projects}
-                  onClose={() => setShowTaskPopup(false)}
-                  onSelectProject={(id) => onSelectProject?.(id)}
-                  onListProjects={(s) => onListProjects(s)}
-                  onCreateTask={(d) => onCreateTask?.(d)}
-                  onImportChat={(ids) => onImportChat?.(ids)}
-                  onSetDirectory={(p) => onSetDirectory?.(p)}
-                />
-              )}
-            </div>
-          )}
         </div>
 
         <button

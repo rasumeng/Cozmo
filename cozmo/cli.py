@@ -66,36 +66,10 @@ def _handle_slash(cmd: str) -> tuple[str, bool]:
     return cmd, False
 
 
-def interactive_session(cfg: dict, initial_query: str | None = None):
-    from .core.runtime import CozmoRuntime
-    from .core.llm import OllamaModel
-    from .core.model_manager import ModelManager
-    from .memory.manager import MemoryManager
-    from .code_indexer import ProjectIndex
-    from .ollama_util import get_ollama_models, pick_model, resolve_minicpm5
-
-    ollama_url = cfg.get("ollama", {}).get("url", "http://localhost:11434")
-    installed = get_ollama_models(ollama_url)
-    lightweight_model = resolve_minicpm5(ollama_url) or pick_model(installed, "chat")
-    is_lightweight = cfg.get("runtime", {}).get("lightweight_mode", False)
-    mm = ModelManager(ollama_url, cfg.get("models", {}),
-                      lightweight_model=lightweight_model if is_lightweight else None,
-                      providers_cfg=cfg.get("providers", {}))
-    router_model = cfg.get("models", {}).get("chat") or pick_model(installed, "chat")
-    router_llm = OllamaModel(router_model, ollama_url)
-    memory = MemoryManager(router_llm, persist_dir=str(Path.home() / ".cozmo" / "memory"))
-    project_index = ProjectIndex(Path.cwd())
-    from .scheduler import Scheduler
-    from .tools.scheduler_task import init_scheduler_tool
-    _sched = Scheduler()
-    _sched.on_trigger = lambda s: None  # No background runner in CLI
-    _sched.start()
-    init_scheduler_tool(_sched)
-    from .memory.knowledge_index import init_knowledge_index
-    init_knowledge_index(knowledge_dir=cfg.get("knowledge_dir", "./knowledge"),
-                         persist_dir=str(Path.home() / ".cozmo" / "knowledge_index"))
-    runtime = CozmoRuntime(model_manager=mm, memory=memory, project_index=project_index, cfg=cfg,
-                           router_llm=router_llm)
+def interactive_session(ctx, initial_query: str | None = None):
+    ctx.init_knowledge_index()
+    _ = ctx.scheduler
+    runtime = ctx.create_runtime()
     runtime.set_permission_callback(
         lambda tool, args: runtime._perms.prompt(tool, args, "cozmo")
     )
@@ -113,36 +87,12 @@ def interactive_session(cfg: dict, initial_query: str | None = None):
             break
 
 
-def coding_session(cfg: dict, project_path: Path, query: str | None = None, auto: bool = False):
-    from .core.runtime import CozmoRuntime
-    from .core.llm import OllamaModel
-    from .core.model_manager import ModelManager
-    from .memory.manager import MemoryManager
+def coding_session(ctx, project_path: Path, query: str | None = None, auto: bool = False):
     from .code_indexer import ProjectIndex
-    from .ollama_util import get_ollama_models, pick_model, resolve_minicpm5
 
-    ollama_url = cfg.get("ollama", {}).get("url", "http://localhost:11434")
-    installed = get_ollama_models(ollama_url)
-    lightweight_model = resolve_minicpm5(ollama_url) or pick_model(installed, "chat")
-    is_lightweight = cfg.get("runtime", {}).get("lightweight_mode", False)
-    mm = ModelManager(ollama_url, cfg.get("models", {}),
-                      lightweight_model=lightweight_model if is_lightweight else None,
-                      providers_cfg=cfg.get("providers", {}))
-    router_model = cfg.get("models", {}).get("chat") or pick_model(installed, "chat")
-    router_llm = OllamaModel(router_model, ollama_url)
-    memory = MemoryManager(router_llm, persist_dir=str(Path.home() / ".cozmo" / "memory"))
-    project_index = ProjectIndex(project_path)
-    from .scheduler import Scheduler
-    from .tools.scheduler_task import init_scheduler_tool
-    _sched = Scheduler()
-    _sched.on_trigger = lambda s: None  # No background runner in CLI
-    _sched.start()
-    init_scheduler_tool(_sched)
-    from .memory.knowledge_index import init_knowledge_index
-    init_knowledge_index(knowledge_dir=cfg.get("knowledge_dir", "./knowledge"),
-                         persist_dir=str(Path.home() / ".cozmo" / "knowledge_index"))
-    runtime = CozmoRuntime(model_manager=mm, memory=memory, project_index=project_index, cfg=cfg,
-                           router_llm=router_llm)
+    ctx.init_knowledge_index()
+    _ = ctx.scheduler
+    runtime = ctx.create_runtime(project_index=ProjectIndex(project_path))
     runtime._perms.auto = auto
     runtime.set_permission_callback(
         lambda tool, args: runtime._perms.prompt(tool, args, "cozmo")
@@ -222,32 +172,16 @@ def coding_session(cfg: dict, project_path: Path, query: str | None = None, auto
         _safe_print(f"Cozmo: {result}")
 
 
-def run_telegram(cfg: dict):
+def run_telegram(ctx):
     from .telegram_bot import TelegramBot
     from .tools.telegram import set_bot_instance
-    from .core.runtime import CozmoRuntime
-    from .core.llm import OllamaModel
-    from .core.model_manager import ModelManager
-    from .memory.manager import MemoryManager
-    from .code_indexer import ProjectIndex
-    from .ollama_util import resolve_minicpm5
 
-    token = cfg.get("telegram", {}).get("bot_token", "")
+    token = ctx.config.get("telegram", {}).get("bot_token", "")
     if not token:
         print("Error: telegram.bot_token not set in config")
         return
 
-    ollama_url = cfg.get("ollama", {}).get("url", "http://localhost:11434")
-    lightweight_model = resolve_minicpm5(ollama_url)
-    is_lightweight = cfg.get("runtime", {}).get("lightweight_mode", False)
-    mm = ModelManager(ollama_url, cfg.get("models", {}),
-                      lightweight_model=lightweight_model if is_lightweight else None,
-                      providers_cfg=cfg.get("providers", {}))
-    router_llm = OllamaModel(lightweight_model, ollama_url)
-    memory = MemoryManager(router_llm, persist_dir=str(Path.home() / ".cozmo" / "memory"))
-    project_index = ProjectIndex(Path.cwd())
-    runtime = CozmoRuntime(model_manager=mm, memory=memory, project_index=project_index, cfg=cfg,
-                           router_llm=router_llm)
+    runtime = ctx.create_runtime()
     # headless: no way to ask — 'ask' rules resolve to deny (fail safe)
 
     bot = TelegramBot(token, runtime)
@@ -285,57 +219,67 @@ def main():
     mcp_parser.add_argument("action", choices=["connect", "list", "disconnect"], nargs="?", default="connect")
     mcp_parser.add_argument("--server", help="Specific server name")
 
+    migrate_parser = sub.add_parser("migrate", help="Migrate persistent data between versions")
+    migrate_parser.add_argument("target", help="Target version (e.g. v1-to-v2)")
+
     args = parser.parse_args()
+
+    ctx = None
 
     if args.command == "init":
         cfg = config.init()
         print(f"Config created at {config.CONFIG_PATH}")
 
     elif args.command == "telegram":
-        cfg = config.load()
-        run_telegram(cfg)
+        from .services import CozmoContext
+        ctx = CozmoContext()
+        run_telegram(ctx)
 
     elif args.command == "run":
-        cfg = config.load()
-        interactive_session(cfg, args.query)
+        from .services import CozmoContext
+        ctx = CozmoContext()
+        interactive_session(ctx, args.query)
 
     elif args.command == "code":
         from .code_indexer import ProjectIndex
+        from .services import CozmoContext
 
-        cfg = config.load()
+        ctx = CozmoContext()
         project_path = Path(args.path).resolve()
         if args.init:
             idx = ProjectIndex(project_path)
             n = idx.index_all()
             print(f"Indexed {n} files in {project_path}")
             return
-        coding_session(cfg, project_path, args.query, auto=args.auto)
+        coding_session(ctx, project_path, args.query, auto=args.auto)
 
     elif args.command == "webui":
-        from .ollama_util import is_ollama_running, start_ollama, stop_ollama, wait_for_ollama
+        from .ollama import is_ollama_running, start_ollama, stop_ollama, wait_for_ollama
         from .webui_server import run_server
+        from .services import CozmoContext
 
-        cfg = config.load()
+        ctx = CozmoContext()
+        ollama_url = ctx.config.get("ollama", {}).get("url", "http://localhost:11434")
         proc, started = None, False
         if not is_ollama_running():
             print("Starting Ollama...")
-            proc = start_ollama()
+            proc = start_ollama(ollama_url)
             if proc:
                 started = True
-                if not wait_for_ollama():
+                if not wait_for_ollama(ollama_url):
                     print("Warning: Ollama didn't respond in time. It may still be starting.")
             else:
                 print("Continuing without Ollama.")
 
         try:
             print(f"Cozmo WebUI at http://{args.host}:{args.port}")
-            run_server(cfg, host=args.host, port=args.port)
+            run_server(ctx.config, host=args.host, port=args.port)
         finally:
             if started:
                 stop_ollama(proc)
 
     elif args.command == "mcp":
-        from .core.mcp_host import MCPHost
+        from .runtime.mcp_host import MCPHost
         import asyncio
 
         async def _run_mcp():
@@ -359,12 +303,42 @@ def main():
 
         asyncio.run(_run_mcp())
 
+    elif args.command == "migrate":
+        if args.target == "v1-to-v2":
+            from .migrate import migrate
+            migrate()
+        else:
+            print(f"Unknown migration target: {args.target}")
+
     elif args.command == "config":
         from .config_cli import handle_config
         handle_config(args, config)
 
     else:
-        parser.print_help()
+        # Default: launch webui
+        from .ollama import is_ollama_running, start_ollama, stop_ollama, wait_for_ollama
+        from .webui_server import run_server
+        from .services import CozmoContext
+
+        ctx = CozmoContext()
+        ollama_url = ctx.config.get("ollama", {}).get("url", "http://localhost:11434")
+        proc, started = None, False
+        if not is_ollama_running():
+            print("Starting Ollama...")
+            proc = start_ollama(ollama_url)
+            if proc:
+                started = True
+                if not wait_for_ollama(ollama_url):
+                    print("Warning: Ollama didn't respond in time. It may still be starting.")
+            else:
+                print("Continuing without Ollama.")
+
+        try:
+            print(f"Cozmo WebUI at http://127.0.0.1:8765")
+            run_server(ctx.config, host="127.0.0.1", port=8765)
+        finally:
+            if started:
+                stop_ollama(proc)
 
 
 if __name__ == "__main__":

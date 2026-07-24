@@ -52,12 +52,11 @@ from fastapi.staticfiles import StaticFiles
 
 from . import config
 from .tools import TOOL_REGISTRY
-from .core.router import route
-from .core.chat.handler import ChatHandler
-from .core.llm import OllamaModel
-from .core.agent.runtime import AgentRuntime
-from .core.agent.event_bus import EventBus, EventType
-from .core.agent.reflector import Reflector, LessonStore
+from .runtime.runtime import CozmoRuntime, _load_all_skills
+from .runtime.event_bus import EventBus
+from .services.context import CozmoContext
+from .runtime.tool_risk import get_tool_risk, risk_to_label
+from .webui import WebUIBackend
 
 DIST_DIR = Path(__file__).parent / "webui" / "dist"
 CHATS_DIR = Path.home() / ".cozmo" / "chats"
@@ -121,11 +120,20 @@ def _broadcast_sync(payload: dict):
 
 # ── Background run helpers ────────────────────────────────────────────────
 
-def _start_background_run(goal: str, cfg: dict) -> str:
+def _start_background_run(goal: str, cfg: dict, job_manager=None) -> str:
     """Start an agent run in a background thread. Returns run_id."""
     import uuid
     run_id = f"bg-{uuid.uuid4().hex[:8]}"
     stop_flag = threading.Event()
+
+    job = None
+    if job_manager:
+        job = job_manager.submit(
+            task_id=f"schedule-{run_id}",
+            strategy="background",
+            metadata={"goal": goal, "type": "scheduled"},
+        )
+        job_manager.start(job.id)
 
     def _emit(event_type: str, **kw):
         kw["type"] = event_type
@@ -134,10 +142,10 @@ def _start_background_run(goal: str, cfg: dict) -> str:
 
     def _worker():
         try:
-            rt = build_runtime(cfg)
+            rt, _, _, _ = build_runtime(cfg)
             rt.stop_event = stop_flag
             _emit("background_run_update", status="running", goal=goal)
-            for item in rt.run_stream(goal, force_mode="agent"):
+            for item in rt.run_stream(goal):
                 if stop_flag.is_set():
                     _emit("background_run_update", status="cancelled", goal=goal)
                     return
@@ -159,12 +167,16 @@ def _start_background_run(goal: str, cfg: dict) -> str:
                 elif kind == "thinking":
                     _emit("background_run_update", status="running", goal=goal, step=item[1])
                 elif kind == "plan":
-                    continue  # auto-approve plan for background runs
+                    continue
                 elif kind in ("progress", "agent_state"):
-                    pass  # not needed for background run logs
+                    pass
+            if job:
+                job_manager.complete(job.id, result="done")
             _emit("background_run_update", status="done", goal=goal)
         except Exception as e:
             import traceback
+            if job:
+                job_manager.complete(job.id, error=str(e))
             _emit("background_run_update", status="error", goal=goal, error=str(e))
             traceback.print_exc()
         finally:
@@ -236,7 +248,9 @@ def _ensure_scheduler(cfg: dict):
         if _scheduler_inst is not None:
             return _scheduler_inst
         _scheduler_inst = Scheduler()
-        _scheduler_inst.on_trigger = lambda s: _start_background_run(s.goal, cfg)
+        b = get_backend(cfg)
+        jm = b.get("job_manager")
+        _scheduler_inst.on_trigger = lambda s: _start_background_run(s.goal, cfg, job_manager=jm)
         _scheduler_inst.start()
         from .tools.scheduler_task import init_scheduler_tool
         init_scheduler_tool(_scheduler_inst)
@@ -244,78 +258,14 @@ def _ensure_scheduler(cfg: dict):
 
 
 def get_backend(cfg: dict) -> dict:
-    """Build the shareable backend once; reuse it for every session.
-
-    Sharing the tool registry + MCP manager means MCP servers are launched
-    a single time for the whole process instead of once per browser tab.
-    """
+    """Build the shareable backend once; reuse it for every session."""
     global _shared_backend
     with _backend_lock:
         if _shared_backend is not None:
             return _shared_backend
 
-        from .core.llm import OllamaModel
-        from .core.model_manager import ModelManager
-        from .memory.manager import MemoryManager
-        from .code_indexer import ProjectIndex
-        from .memory.knowledge_index import init_knowledge_index
-        from .ollama_util import get_ollama_models, pick_model, resolve_minicpm5
-        from .core.tool_registry import ToolRegistry
-        from .core.providers.mcp import MCPManager
-        from .core.runtime import _load_all_skills
-        from .tools import TOOL_REGISTRY
-
-        ollama_url = cfg.get("ollama", {}).get("url", "http://localhost:11434")
-        installed = get_ollama_models(ollama_url)
-        lightweight_model = resolve_minicpm5(ollama_url) or pick_model(installed, "chat")
-        is_lightweight = cfg.get("runtime", {}).get("lightweight_mode", False)
-        mm = ModelManager(ollama_url, cfg.get("models", {}),
-                          lightweight_model=lightweight_model if is_lightweight else None,
-                          providers_cfg=cfg.get("providers", {}))
-        router_model = cfg.get("models", {}).get("chat") or pick_model(installed, "chat")
-        router_llm = OllamaModel(router_model, ollama_url)
-        memory = MemoryManager(router_llm, persist_dir=str(Path.home() / ".cozmo" / "memory"))
-        project_index = ProjectIndex(Path.cwd())
-        ki = init_knowledge_index(knowledge_dir=cfg.get("knowledge_dir", "./knowledge"),
-                                   persist_dir=str(Path.home() / ".cozmo" / "knowledge_index"))
-
-        registry = ToolRegistry()
-        for name, fn in TOOL_REGISTRY.items():
-            registry.register(name, fn)
-
-        # One MCP manager for the whole process — persistent connections,
-        # launched once, kept alive across sessions.
-        mcp = MCPManager(registry)
-        try:
-            mcp.start(cfg)
-        except Exception as e:
-            print(f"[cozmo] MCP startup failed: {e}")
-
-        # Skills read from disk once, shared read-only across sessions.
-        skills = _load_all_skills()
-
-        chat_handler = ChatHandler(mm, cfg, memory=memory)
-        agent_runtime = AgentRuntime(
-            model_manager=mm,
-            tool_registry=registry,
-            planner_llm=router_llm,
-            cfg=cfg,
-            skills=skills,
-        )
-        reflector = Reflector()
-
-        _shared_backend = {
-            "model_manager": mm,
-            "router_llm": router_llm,
-            "memory": memory,
-            "project_index": project_index,
-            "registry": registry,
-            "mcp": mcp,
-            "skills": skills,
-            "chat_handler": chat_handler,
-            "agent_runtime": agent_runtime,
-            "reflector": reflector,
-        }
+        web_ui = WebUIBackend(cfg)
+        _shared_backend = web_ui.build_backend()
         return _shared_backend
 
 
@@ -327,17 +277,11 @@ def _safe_child(base: Path, name: str, suffix: str = "") -> Path:
     return p
 
 def build_runtime(cfg: dict):
-    """Construct a per-session runtime cheaply from the shared backend.
-
-    Only the per-session state (history, callbacks, stop flag) is fresh;
-    models, tool registry, MCP connections, memory and skills are shared.
-    """
-    from .core.runtime import CozmoRuntime
-
+    """Construct a per-session runtime cheaply from the shared backend."""
     b = get_backend(cfg)
     event_bus = EventBus()
     runtime = CozmoRuntime(
-        model_manager=b["model_manager"],
+        model_service=b["model_service"],
         memory=b["memory"],
         registry=b["registry"],
         project_index=b["project_index"],
@@ -345,10 +289,9 @@ def build_runtime(cfg: dict):
         router_llm=b["router_llm"],
         skills=b["skills"],
         event_bus=event_bus,
-        reflector=b["reflector"],
     )
-    runtime._mcp_manager = b["mcp"]  # shared; do NOT stop on session close
-    return runtime, b["chat_handler"], b["agent_runtime"], event_bus
+    runtime._mcp_manager = b["mcp"]
+    return runtime, b["orchestrator"], b["job_manager"], event_bus
 
 
 def seed_default_skills():
@@ -365,11 +308,11 @@ def seed_default_skills():
             continue
         shutil.copytree(str(folder), str(target), dirs_exist_ok=True)
 
-class ChatSession:
+class Session:
     """One WebSocket connection = one runtime + one run at a time."""
 
     def __init__(self, cfg: dict, loop: asyncio.AbstractEventLoop):
-        self.runtime, self.chat_handler, self.agent_runtime, self.event_bus = build_runtime(cfg)
+        self.runtime, self.orchestrator, self.job_manager, self.event_bus = build_runtime(cfg)
         self.loop = loop
         self.events: asyncio.Queue = asyncio.Queue()
         self.stop_flag = threading.Event()
@@ -380,9 +323,27 @@ class ChatSession:
         self._plan_approved = False
         self._worker: threading.Thread | None = None
         self.current_conv_id = ""
+        self.current_job_id = ""
+        self.current_task_id = ""
         self.agent_config: dict = {}
         self.runtime.set_permission_callback(self._ask_permission)
         self.runtime.set_plan_callback(self._ask_plan)
+
+        # Bridge EventBus→WebSocket: forward runtime events
+        self.event_bus.on_any(self._on_bus_event)
+
+    def _on_bus_event(self, event):
+        """Forward EventBus events as WebSocket messages."""
+        t = event.type
+        d = event.data
+        if t == "tool_called":
+            self._emit({"type": "tool_call", "tool": d.get("tool", ""),
+                        "args": d.get("args", {}), "id": d.get("call_id", ""),
+                        "category": d.get("category", "")})
+        elif t == "tool_result":
+            self._emit({"type": "tool_result", "tool": d.get("tool", ""),
+                        "result": d.get("output", ""), "id": d.get("call_id", ""),
+                        "diff": d.get("diff")})
 
     def apply_agent_config(self):
         if not self.agent_config:
@@ -390,11 +351,11 @@ class ChatSession:
         ac = self.agent_config
         model = ac.get("model")
         if model:
-            self.runtime.model_manager.set_override("agent", model)
+            self.runtime.force_model = model
         if "max_steps" in ac:
             self.runtime.max_steps = int(ac["max_steps"])
         if "temperature" in ac:
-            self.runtime.temps["agent"] = float(ac["temperature"])
+            self.runtime.temperature = float(ac["temperature"])
         self.runtime._agent_system_extra = ac.get("system_prompt", "")
 
     # runs in worker thread
@@ -406,7 +367,6 @@ class ChatSession:
     def _ask_permission(self, tool: str, args: dict) -> bool:
         self._perm_event.clear()
         self._emit({"type": "permission_request", "tool": tool, "args": args})
-        # 120s timeout → deny (fail safe, matches headless behavior)
         if not self._perm_event.wait(timeout=120):
             return False
         return self._perm_allowed
@@ -419,7 +379,6 @@ class ChatSession:
     def _ask_plan(self, plan_text: str) -> bool:
         self._plan_event.clear()
         self._emit({"type": "plan", "plan": plan_text})
-        # 300s timeout → reject (fail safe)
         if not self._plan_event.wait(timeout=300):
             return False
         return self._plan_approved
@@ -444,67 +403,63 @@ class ChatSession:
             resolved.append(entry)
         return resolved
 
-    def start_run(self, user_input: str, attachments_meta: list[dict] | None = None, project_context: str | None = None, force_mode: str | None = None):
+    def start_run(self, user_input: str, attachments_meta: list[dict] | None = None, project_context: str | None = None):
         self.stop_flag.clear()
         resolved_atts = self._resolve_attachments(attachments_meta) if attachments_meta else None
         if project_context:
             self.runtime._project_context = project_context
         else:
             self.runtime._project_context = ""
-        if force_mode == "agent":
-            self.apply_agent_config()
 
         def work():
             try:
-                mode = force_mode or route(
-                    user_input, self.runtime.router_llm, self.runtime.history,
-                    bool(resolved_atts and any(a.get("type") == "image" for a in resolved_atts))
+                # Plan via orchestrator
+                plan = self.orchestrator.plan(user_input=user_input, has_images=bool(resolved_atts))
+
+                # Submit job via job manager
+                job = self.job_manager.submit(
+                    task_id=plan.task_id,
+                    strategy=plan.strategy.value,
+                    metadata={"intent": plan.goal.intent.value, "tools": plan.tools},
                 )
-                runtime_args = {
-                    "user_input": user_input,
-                    "attachments": resolved_atts,
-                    "force_mode": mode,
-                }
-                if mode == "agent" and self.agent_runtime:
-                    runtime_args["agent_runtime"] = self.agent_runtime
-                for item in self.runtime.run_stream(**runtime_args):
+                self.current_job_id = job.id
+                self.job_manager.start(job.id)
+
+                for item in self.runtime.run_stream(
+                    user_input=user_input,
+                    attachments=resolved_atts,
+                    execution_plan=plan,
+                ):
                     if self.stop_flag.is_set():
                         self._emit({"type": "thinking", "text": "Stopped by user", "detail": "Generation was cancelled by the user"})
                         break
-                        kind = item[0]
-                        if kind == "tool_call":
-                            _, name, args, call_id = item[:4]
-                            payload = {"type": "tool_call", "tool": name, "args": args, "id": call_id}
-                            if len(item) >= 5 and item[4] is not None:
-                                payload["category"] = item[4]
-                            self._emit(payload)
-                        elif kind == "tool_result":
-                            _, name, result, call_id = item[:4]
-                            payload = {"type": "tool_result", "tool": name, "result": result, "id": call_id}
-                            if len(item) >= 5 and item[4] is not None:
-                                payload["diff"] = item[4]
-                            self._emit(payload)
-                        elif kind == "plan":
-                            text = item[1]
-                            payload = {"type": "plan", "plan": text}
-                            if len(item) >= 5 and item[4] is not None:
-                                payload["steps"] = item[4]
-                            self._emit(payload)
-                        elif kind == "progress":
-                            _, current, total, label = item
-                            self._emit({"type": "progress", "current": current, "total": total, "label": label})
-                        elif kind == "agent_state":
-                            data = item[1]
-                            self._emit({"type": "agent_state", **data})
-                        elif kind == "reasoning":
-                            self._emit({"type": "reasoning", "text": item[1]})
-                        else:
-                            text = item[1]
-                            detail = item[2] if len(item) > 2 else None
-                            query = item[3] if len(item) > 3 else None
-                            self._emit({"type": kind, "text": text, "detail": detail, "query": query})
+                    kind = item[0]
+                    if kind == "tool_call":
+                        _, name, args, call_id = item[:4]
+                        payload = {"type": "tool_call", "tool": name, "args": args, "id": call_id}
+                        if len(item) >= 5 and item[4] is not None:
+                            payload["category"] = item[4]
+                        self._emit(payload)
+                    elif kind == "tool_result":
+                        _, name, result, call_id = item[:4]
+                        payload = {"type": "tool_result", "tool": name, "result": result, "id": call_id}
+                        if len(item) >= 5 and item[4] is not None:
+                            payload["diff"] = item[4]
+                        self._emit(payload)
+                    elif kind == "reasoning":
+                        self._emit({"type": "reasoning", "text": item[1]})
+                    else:
+                        text = item[1]
+                        detail = item[2] if len(item) > 2 else None
+                        query = item[3] if len(item) > 3 else None
+                        self._emit({"type": kind, "text": text, "detail": detail, "query": query})
+
+                self.job_manager.complete(job.id, result="done")
+
             except Exception as e:
                 self._emit({"type": "error", "text": str(e)})
+                if job:
+                    self.job_manager.complete(job.id, error=str(e))
             finally:
                 self._emit({"type": "done"})
 
@@ -513,10 +468,8 @@ class ChatSession:
 
     def stop(self):
         self.stop_flag.set()
-        # unblock a pending permission prompt as a denial
         self._perm_allowed = False
         self._perm_event.set()
-        # unblock a pending plan-approval prompt as a rejection
         self._plan_approved = False
         self._plan_event.set()
 
@@ -555,6 +508,9 @@ def create_app(cfg: dict | None = None) -> FastAPI:
             role = "User" if m.get("role") == "user" else "Cozmo"
             lines.append(f"## {role}")
             lines.append(m.get("content", ""))
+            model = m.get("model")
+            if model:
+                lines.append(f"@model {model}")
             atts = m.get("attachments")
             if atts:
                 lines.append(f"@attachments {json.dumps(atts)}")
@@ -604,6 +560,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
 
     def _build_msg(conv_id: str, role: str, lines: list, idx: int) -> dict:
         atts = None
+        model = None
         clean = []
         for l in lines:
             if l.startswith("@attachments "):
@@ -611,6 +568,8 @@ def create_app(cfg: dict | None = None) -> FastAPI:
                     atts = json.loads(l[len("@attachments "):])
                 except json.JSONDecodeError:
                     clean.append(l)
+            elif l.startswith("@model "):
+                model = l[len("@model "):].strip()
             else:
                 clean.append(l)
         msg = {"role": role,
@@ -619,6 +578,8 @@ def create_app(cfg: dict | None = None) -> FastAPI:
                "createdAt": ""}
         if atts:
             msg["attachments"] = atts
+        if model:
+            msg["model"] = model
         return msg
 
     @app.put("/api/conversations")
@@ -727,6 +688,8 @@ def create_app(cfg: dict | None = None) -> FastAPI:
         for k, v in cfg.items():
             if k.startswith("_"):
                 continue
+            if v is None:
+                continue
             if isinstance(v, dict):
                 sv = _sanitize_config(v)
                 if sv:
@@ -734,6 +697,20 @@ def create_app(cfg: dict | None = None) -> FastAPI:
             elif isinstance(v, (str, int, float, bool, list)):
                 safe[k] = v
         return safe
+
+    def _strip_none(d: dict) -> dict:
+        """Remove keys with None values recursively (TOML can't serialize None)."""
+        out = {}
+        for k, v in d.items():
+            if v is None:
+                continue
+            if isinstance(v, dict):
+                cleaned = _strip_none(v)
+                if cleaned:
+                    out[k] = cleaned
+            else:
+                out[k] = v
+        return out
 
     @app.get("/api/config")
     def get_config():
@@ -751,7 +728,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
         import tomli_w
         CONFIG_PATH = config.CONFIG_PATH
         CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        CONFIG_PATH.write_text(tomli_w.dumps(cfg), "utf-8")
+        CONFIG_PATH.write_text(tomli_w.dumps(_strip_none(cfg)), "utf-8")
         # notify the shared backend so in-memory state matches disk
         with _backend_lock:
             backend = _shared_backend
@@ -760,20 +737,6 @@ def create_app(cfg: dict | None = None) -> FastAPI:
                 backend["mcp"].refresh_from_config(cfg)
             except Exception as e:
                 print(f"[cozmo] MCP config refresh failed: {e}")
-            mm = backend.get("model_manager")
-            if mm:
-                if "models" in body:
-                    mm.reload_models(cfg.get("models", {}))
-                runtime = body.get("runtime", {})
-                if "lightweight_mode" in runtime:
-                    is_lw = runtime["lightweight_mode"]
-                    lm = None
-                    if is_lw:
-                        from .ollama_util import resolve_minicpm5, get_ollama_models, pick_model
-                        ollama_url = cfg.get("ollama", {}).get("url", "http://localhost:11434")
-                        installed_list = get_ollama_models(ollama_url)
-                        lm = resolve_minicpm5(ollama_url) or pick_model(installed_list, "chat")
-                    mm.set_lightweight_mode(is_lw, lm)
         return {"ok": True}
 
     # ── Ollama available models ─────────────────────────────────
@@ -802,9 +765,25 @@ def create_app(cfg: dict | None = None) -> FastAPI:
         return [{"id": role, "name": name, "role": role, "active": role == "chat"}
                 for role, name in models.items()]
 
+    @app.get("/api/models/available")
+    def get_available_models():
+        """Return all models discovered across all configured providers."""
+        try:
+            b = get_backend(cfg)
+            ms = b.get("model_service")
+            if ms:
+                by_provider = ms.list_available()
+                return [
+                    {"name": m.name, "provider": m.provider}
+                    for provider, models in by_provider.items()
+                    for m in models
+                ]
+        except Exception:
+            pass
+        return []
+
     @app.get("/api/tools")
     def get_tools():
-        from .core.tool_risk import get_tool_risk, risk_to_label
         return [{"id": name, "name": name,
                  "description": (fn.__doc__ or "").strip().split("\n")[0],
                  "enabled": True,
@@ -1075,7 +1054,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
             if mcp_detail:
                 detail.update(mcp_detail)
         # merge catalog metadata if available
-        from .core.providers.catalog import lookup_by_name
+        from .runtime.providers.catalog import lookup_by_name
         meta = lookup_by_name(name)
         if meta:
             detail["source"] = "catalog"
@@ -1097,7 +1076,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
 
     @app.get("/api/mcp/catalog")
     def get_mcp_catalog():
-        from .core.providers.catalog import get_catalog_serializable
+        from .runtime.providers.catalog import get_catalog_serializable
         return get_catalog_serializable()
 
     # ── MCP Test ────────────────────────────────────────────────
@@ -1112,7 +1091,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
         if not server_cfg:
             return {"ok": False, "error": f"server '{name}' not found in config"}
         try:
-            from .core.mcp_host import MCPHost
+            from .runtime.mcp_host import MCPHost
             import asyncio
             mcp = MCPHost({"servers": {name: server_cfg}})
             async def _test():
@@ -1229,7 +1208,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
         task = task_queue.get(task_id)
         if not task:
             return {"error": "not found"}
-        task_queue.run_task(task, lambda: build_runtime(cfg))
+        task_queue.run_task(task, lambda: build_runtime(cfg)[0])
         return task.to_dict()
 
     @app.post("/api/tasks/{task_id}/cancel")
@@ -1250,7 +1229,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
         await ws.accept()
         loop = asyncio.get_running_loop()
         conn_id = _register_sender(loop, ws)
-        session = ChatSession(cfg, loop)
+        session = Session(cfg, loop)
 
         async def pump_events():
             while True:
@@ -1286,8 +1265,9 @@ def create_app(cfg: dict | None = None) -> FastAPI:
                                 project_context = p.get("sharedContext", "")
                                 break
                     session.current_conv_id = conv_id
-                    mode = msg.get("mode")
-                    session.start_run(content, attachments_meta, project_context, force_mode=mode)
+                    if msg.get("mode"):
+                        log.warning("client sent 'mode' field — ignored in unified pipeline")
+                    session.start_run(content, attachments_meta, project_context)
                 elif mtype == "agent_config":
                     session.agent_config = {k: v for k, v in msg.items() if k not in ("type",)}
                     await ws.send_text(json.dumps({"type": "agent_config", **session.agent_config}))

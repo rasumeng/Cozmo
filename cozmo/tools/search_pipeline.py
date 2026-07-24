@@ -104,7 +104,8 @@ def rewrite_query(query: str, llm=None) -> str:
 # ─── Phase 2: Multi-Source Search ─────────────────────────────────────────────
 
 def _search_searxng(query: str, config: SearchConfig) -> list[SearchResult]:
-    """Search using SearXNG (self-hosted)."""
+    if not query or not query.strip():
+        return []
     import urllib.request
     import urllib.parse
 

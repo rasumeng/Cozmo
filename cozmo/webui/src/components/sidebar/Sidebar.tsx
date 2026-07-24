@@ -1,10 +1,9 @@
 import { useState, useMemo } from 'react'
 import { motion } from 'framer-motion'
-import { PanelLeftClose, PanelLeftOpen, Plus, Search, Settings, FolderKanban, MessageSquare } from 'lucide-react'
+import { PanelLeftClose, PanelLeftOpen, Plus, Search } from 'lucide-react'
 import { Conversation, Project } from '@/types'
 import { SidebarItem } from './SidebarItem'
-import { WorkspaceTabs } from './WorkspaceTabs'
-import { WORKSPACE_MODE_CONFIG, WorkspaceMode } from './workspaceModes'
+import { NAV_ITEMS, NAV_ORDER, NavItemId } from './workspaceModes'
 import { SearchModal } from '@/components/search/SearchModal'
 
 interface Props {
@@ -13,31 +12,21 @@ interface Props {
   conversations: Conversation[]
   activeId: string
   onSelect: (id: string) => void
-  onNewChat: (mode?: WorkspaceMode) => void
-  onTabChange: (mode: WorkspaceMode) => void
+  onNewChat: () => void
   onPin: (id: string) => void
   onRename: (id: string, title: string) => void
   onDelete: (id: string) => void
   projects?: Project[]
-  showProjects?: boolean
-  onToggleProjects?: () => void
-  onAddToProject?: (convId: string, projId: string) => void
-  settingsOpen?: boolean
-  onOpenSettings?: () => void
-  onCloseSettings?: () => void
+  activeSection: NavItemId
+  onSectionChange: (id: NavItemId) => void
+  jobsCount?: number
 }
 
-export function Sidebar({ collapsed, onToggleCollapse, conversations, activeId, onSelect, onNewChat, onTabChange, onPin, onRename, onDelete, projects, showProjects, onToggleProjects, onAddToProject, settingsOpen, onOpenSettings, onCloseSettings }: Props) {
-  const [mode, setMode] = useState<WorkspaceMode>('chat')
+export function Sidebar({ collapsed, onToggleCollapse, conversations, activeId, onSelect, onNewChat, onPin, onRename, onDelete, projects, activeSection, onSectionChange, jobsCount = 0 }: Props) {
   const [searchOpen, setSearchOpen] = useState(false)
-  const modeConfig = WORKSPACE_MODE_CONFIG[mode]
 
-  const handleModeChange = (m: WorkspaceMode) => {
-    if (m === mode) return
-    setMode(m)
-    onTabChange(m)
-  }
-  const modeConversations = useMemo(() => conversations.filter((c) => c.mode === mode), [conversations, mode])
+  const pinned = useMemo(() => conversations.filter((c) => c.pinned), [conversations])
+  const recent = useMemo(() => conversations.filter((c) => !c.pinned), [conversations])
 
   return (
     <motion.aside
@@ -49,10 +38,7 @@ export function Sidebar({ collapsed, onToggleCollapse, conversations, activeId, 
         <div className="flex items-center gap-2.5">
           <img src="/assets/Cozmo-sprite.svg" alt="Cozmo" className="w-auto h-8" style={{ imageRendering: 'pixelated' }} />
           {!collapsed && (
-            <div className="flex flex-col">
-              <span className="font-semibold tracking-tight text-base-100 leading-tight">Cozmo</span>
-              <span className="text-[10px] text-base-500 tracking-wide">AI Agent</span>
-            </div>
+            <span className="font-semibold tracking-tight text-base-100 leading-tight">Cozmo</span>
           )}
         </div>
         <button
@@ -63,72 +49,94 @@ export function Sidebar({ collapsed, onToggleCollapse, conversations, activeId, 
         </button>
       </div>
 
-      <div className="px-2 space-y-2">
-        <WorkspaceTabs active={mode} onChange={handleModeChange} collapsed={collapsed} />
+      <div className="px-2 space-y-1">
+        {NAV_ORDER.filter((id) => id !== 'settings').map((id) => {
+          const item = NAV_ITEMS[id]
+          const Icon = item.icon
+          return (
+            <button
+              key={id}
+              onClick={() => onSectionChange(id)}
+              className={`w-full flex items-center gap-2 px-2.5 py-2 rounded-xl text-sm font-medium transition-colors ${
+                activeSection === id
+                  ? 'bg-base-800 text-base-100'
+                  : 'text-base-400 hover:text-base-200 hover:bg-base-800/50'
+              }`}
+            >
+              <Icon size={15} />
+              {!collapsed && (
+                <span className="flex-1 text-left">{item.label}</span>
+              )}
+              {!collapsed && id === 'jobs' && jobsCount > 0 && (
+                <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded-full bg-accent/20 text-accent">
+                  {jobsCount}
+                </span>
+              )}
+            </button>
+          )
+        })}
+      </div>
 
-        <button
-          onClick={() => onNewChat(mode)}
-          className="w-full flex items-center gap-2 px-2.5 py-2 rounded-xl bg-accent/90 hover:bg-accent text-white text-sm font-medium transition-colors"
-        >
-          <Plus size={16} />
-          {!collapsed && modeConfig.createLabel}
-        </button>
-        {!collapsed && (
-          <button onClick={() => setSearchOpen(true)} className="w-full flex items-center gap-2 px-2.5 py-2 rounded-xl text-base-300 hover:bg-base-800 text-sm transition-colors">
-            <Search size={15} />
-            {modeConfig.searchLabel}
-          </button>
+      <div className="flex flex-col min-h-0 flex-1">
+        {!collapsed && activeSection === 'conversations' && (
+          <>
+            <button
+              onClick={onNewChat}
+              className="mx-2 mt-2 flex items-center gap-2 px-2.5 py-2 rounded-xl bg-accent/90 hover:bg-accent text-white text-sm font-medium transition-colors"
+            >
+              <Plus size={16} />
+              New Conversation
+            </button>
+
+            <button
+              onClick={() => setSearchOpen(true)}
+              className="mx-2 mt-1 flex items-center gap-2 px-2.5 py-2 rounded-xl text-base-300 hover:bg-base-800 text-sm transition-colors"
+            >
+              <Search size={15} />
+              Search
+            </button>
+
+            <div className="flex-1 overflow-y-auto mt-3 px-2 space-y-1">
+              {pinned.length > 0 && (
+                <>
+                  <p className="px-2.5 text-[11px] uppercase tracking-wider text-accent mb-1">Pinned</p>
+                  {pinned.map((c) => (
+                    <SidebarItem key={c.id} conversation={c} active={c.id === activeId} onClick={() => onSelect(c.id)} onPin={onPin} onRename={onRename} onDelete={onDelete} />
+                  ))}
+                  <div className="h-2" />
+                </>
+              )}
+              <p className="px-2.5 text-[11px] uppercase tracking-wider text-base-500 mb-1">Recent</p>
+              {recent.map((c) => (
+                <SidebarItem key={c.id} conversation={c} active={c.id === activeId} onClick={() => onSelect(c.id)} onPin={onPin} onRename={onRename} onDelete={onDelete} />
+              ))}
+            </div>
+          </>
         )}
-        <button
-          onClick={onToggleProjects}
-          className={`w-full flex items-center gap-2 px-2.5 py-2 rounded-xl text-sm transition-colors ${
-            showProjects ? 'bg-accent/15 text-accent' : 'text-base-300 hover:bg-base-800 hover:text-base-100'
-          }`}
-        >
-          <FolderKanban size={15} />
-          {!collapsed && 'Projects'}
-        </button>
       </div>
 
       {!collapsed && (
-        <div className="flex-1 overflow-y-auto mt-4 px-2 space-y-1">
+        <div className="px-2 pb-3 border-t border-base-800 pt-2">
           {(() => {
-            const pinned = modeConversations.filter((c) => c.pinned)
-            const recent = modeConversations.filter((c) => !c.pinned)
+            const Icon = NAV_ITEMS.settings.icon
             return (
-              <>
-                {pinned.length > 0 && (
-                  <>
-                    <p className="px-2.5 text-[11px] uppercase tracking-wider text-accent mb-1">Pinned</p>
-                    {pinned.map((c) => (
-                      <SidebarItem key={c.id} conversation={c} active={c.id === activeId} onClick={() => onSelect(c.id)} onPin={onPin} onRename={onRename} onDelete={onDelete} projects={projects} onAddToProject={onAddToProject} />
-                    ))}
-                    <div className="h-2" />
-                  </>
-                )}
-                <p className="px-2.5 text-[11px] uppercase tracking-wider text-base-500 mb-1">{modeConfig.emptyRecentLabel}</p>
-                {recent.map((c) => (
-                  <SidebarItem key={c.id} conversation={c} active={c.id === activeId} onClick={() => onSelect(c.id)} onPin={onPin} onRename={onRename} onDelete={onDelete} projects={projects} onAddToProject={onAddToProject} />
-                ))}
-              </>
+              <button
+                onClick={() => onSectionChange('settings')}
+                className={`w-full flex items-center gap-2 px-2.5 py-2 rounded-xl text-sm font-medium transition-colors ${
+                  activeSection === 'settings'
+                    ? 'bg-base-800 text-base-100'
+                    : 'text-base-400 hover:text-base-200 hover:bg-base-800/50'
+                }`}
+              >
+                <Icon size={15} />
+                <span className="flex-1 text-left">{NAV_ITEMS.settings.label}</span>
+              </button>
             )
           })()}
         </div>
       )}
 
-      <div className="mt-auto px-2 py-3 space-y-0.5 border-t border-base-800">
-        <SidebarFooterItem icon={<Settings size={15} />} label="Settings" collapsed={collapsed} onClick={() => onOpenSettings?.()} />
-      </div>
       <SearchModal open={searchOpen} onClose={() => setSearchOpen(false)} onSelect={onSelect} />
     </motion.aside>
-  )
-}
-
-function SidebarFooterItem({ icon, label, collapsed, onClick }: { icon: React.ReactNode; label: string; collapsed: boolean; onClick?: () => void }) {
-  return (
-    <button onClick={onClick} className="w-full flex items-center gap-2.5 px-2.5 py-2 rounded-xl text-base-400 hover:text-base-100 hover:bg-base-800 text-sm transition-colors">
-      {icon}
-      {!collapsed && label}
-    </button>
   )
 }

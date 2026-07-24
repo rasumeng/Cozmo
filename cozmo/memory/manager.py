@@ -23,8 +23,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from sentence_transformers import SentenceTransformer
-
+from ..services import EmbeddingService
+from .. import config as cozmo_config
 from .lancedb_store import LanceStore
 
 log = logging.getLogger("cozmo.memory.manager")
@@ -55,7 +55,7 @@ class MemoryManager:
         self,
         llm,
         persist_dir: str,
-        embed_model: str = "all-MiniLM-L6-v2",
+        embed_model: str | EmbeddingService | None = None,
         max_turns: int = 5,
     ):
         self.llm = llm
@@ -63,11 +63,18 @@ class MemoryManager:
         self.max_turns = max_turns
         self.turn_count = 0
 
-        self._embedder = SentenceTransformer(embed_model)
-        embed_dim = self._embedder.get_sentence_embedding_dimension() or 384
+        if isinstance(embed_model, EmbeddingService):
+            embed_service = embed_model
+        else:
+            cfg = cozmo_config.load()
+            model_name = embed_model or cfg.get("embedding", {}).get("model", "all-MiniLM-L6-v2")
+            embed_service = EmbeddingService({"embedding": {"model": model_name}})
 
         def embed(text: str) -> list[float]:
-            return self._embedder.encode(text, normalize_embeddings=True).tolist()
+            return embed_service.encode(text, normalize=True)
+
+        embed_dim = embed_service.dimension
+        self._embedder = embed_service
 
         self.store = LanceStore(
             uri=Path(persist_dir) / "lancedb",

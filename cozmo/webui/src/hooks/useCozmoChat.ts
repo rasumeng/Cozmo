@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Conversation, InlineStep, WorkspaceMode, Attachment, Project, PlanData, AgentTaskCreate, BackgroundRunInfo, BackgroundRunLog, ScheduledTaskInfo, AgentStateInfo, ProgressInfo } from '@/types'
+import { Conversation, InlineStep, Attachment, Project, PlanData, BackgroundRunInfo, AgentStateInfo, ProgressInfo } from '@/types'
 import { CozmoClient, ConnectionState, ServerEvent, fetchConversations, saveConversation, deleteConversationApi, fetchProjects, createProject, updateProject, deleteProjectApi, fetchProjectConversations } from '@/services/cozmo'
 
 export interface PermissionRequest {
@@ -23,13 +23,9 @@ export function useCozmoChat() {
   const [inlineSteps, setInlineSteps] = useState<InlineStep[]>([])
   const [permission, setPermission] = useState<PermissionRequest | null>(null)
   const [plan, setPlan] = useState<PlanData | null>(null)
-  const [currentDirectory, setCurrentDirectory] = useState('./')
-  const [permissionMode, setPermissionMode] = useState('manual')
-  const [recentConversations, setRecentConversations] = useState<{ id: string; title: string; mode: string; updatedAt: string }[]>([])
-  const [agentTask, setAgentTask] = useState<Project | null>(null)
   const [backgroundRuns, setBackgroundRuns] = useState<BackgroundRunInfo[]>([])
-  const [schedules, setSchedules] = useState<ScheduledTaskInfo[]>([])
-  const [draftMode, setDraftMode] = useState<WorkspaceMode>('chat')
+  const currentModelRef = useRef('')
+
   const [agentState, setAgentState] = useState<AgentStateInfo | null>(null)
   const [progress, setProgress] = useState<ProgressInfo | null>(null)
   const [projects, setProjects] = useState<Project[]>([])
@@ -86,6 +82,7 @@ export function useCozmoChat() {
             content: text,
             createdAt: now(),
             streaming: true,
+            model: currentModelRef.current || undefined,
           })
         }
         return { ...c, messages: msgs, updatedAt: 'Just now' }
@@ -95,6 +92,7 @@ export function useCozmoChat() {
   )
 
   const finishStreaming = useCallback(() => {
+    currentModelRef.current = ''
     updateActive((c) => ({
       ...c,
       messages: c.messages.map((m) => (m.streaming ? { ...m, streaming: false } : m)),
@@ -209,6 +207,9 @@ export function useCozmoChat() {
         case 'reasoning':
           pushReasoning(ev.text)
           break
+        case 'model':
+          currentModelRef.current = ev.text
+          break
         case 'agent_status':
           pushStep({
             type: 'thinking',
@@ -242,20 +243,16 @@ export function useCozmoChat() {
           ))
           break
         case 'directory_set':
-          setCurrentDirectory(ev.path)
           break
         case 'projects_list':
           setProjects(ev.projects)
           break
         case 'recent_conversations':
-          setRecentConversations(ev.conversations)
           break
         case 'project_created':
-          setAgentTask(ev.project)
           setProjects(prev => [ev.project, ...prev])
           break
         case 'project_selected':
-          setAgentTask(ev.project)
           break
         case 'background_run_update':
           setBackgroundRuns(prev => {
@@ -280,16 +277,9 @@ export function useCozmoChat() {
           setBackgroundRuns(ev.runs)
           break
         case 'schedule_list':
-          setSchedules(ev.schedules)
-          break
         case 'schedule_created':
-          setSchedules(prev => [ev.schedule, ...prev])
-          break
         case 'schedule_deleted':
-          setSchedules(prev => prev.filter(s => s.id !== ev.schedule_id))
-          break
         case 'schedule_toggled':
-          setSchedules(prev => prev.map(s => s.id === ev.schedule_id ? { ...s, enabled: ev.enabled } : s))
           break
         case 'progress':
           setProgress({ current: ev.current, total: ev.total, label: ev.label })
@@ -317,6 +307,7 @@ export function useCozmoChat() {
           break
         case 'error':
           appendToken(`\n\n**Error:** ${ev.text}`)
+          currentModelRef.current = ''
           setGenerating(false)
           setProgress(null)
           break
@@ -356,17 +347,16 @@ export function useCozmoChat() {
           title: trimmed.slice(0, 48) || 'Attachments',
           updatedAt: 'Just now',
           pinned: false,
-          mode: draftMode,
           messages: [{ id: nextId(), role: 'user', content: textToSend, createdAt: now(), attachments }],
         }
-        if (!client.sendChat(textToSend, newId, attachments, projectId, draftMode)) return
+        if (!client.sendChat(textToSend, newId, attachments, projectId)) return
         setConversations((convs) => [newConv, ...convs])
         setActiveId(newId)
         dirtyRef.current = true
         setInlineSteps([])
         setGenerating(true)
       } else {
-        if (!client.sendChat(textToSend, resolvedActiveId, attachments, projectId, draftMode)) return
+        if (!client.sendChat(textToSend, resolvedActiveId, attachments, projectId)) return
         updateActive((c) => ({
           ...c,
           title: c.messages.length === 0 ? (trimmed.slice(0, 48) || 'Attachments') : c.title,
@@ -381,7 +371,7 @@ export function useCozmoChat() {
         setGenerating(true)
       }
     },
-    [generating, updateActive, resolvedActiveId, draftMode, projects]
+    [generating, updateActive, resolvedActiveId, projects]
   )
 
   const stop = useCallback(() => {
@@ -402,37 +392,6 @@ export function useCozmoChat() {
     }
   }, [])
 
-  const setDirectory = useCallback((path: string) => {
-    clientRef.current?.setDirectory(path)
-  }, [])
-
-  const handleSetPermissionMode = useCallback((mode: string) => {
-    setPermissionMode(mode)
-    clientRef.current?.setPermissionMode(mode)
-  }, [])
-
-
-
-  const handleListProjects = useCallback((search?: string) => {
-    clientRef.current?.listProjects(search)
-  }, [])
-
-  const handleGetRecentConversations = useCallback((mode?: string, limit?: number) => {
-    clientRef.current?.getRecentConversations(mode, limit)
-  }, [])
-
-  const handleImportFromChat = useCallback((conversationIds: string[]) => {
-    clientRef.current?.importFromChat(conversationIds)
-  }, [])
-
-  const handleAgentCreateTask = useCallback((data: AgentTaskCreate) => {
-    clientRef.current?.createProject(data)
-  }, [])
-
-  const handleSelectProject = useCallback((projectId: string) => {
-    clientRef.current?.selectProject(projectId)
-  }, [])
-
   const handleStartBackgroundRun = useCallback((goal: string) => {
     if (!goal.trim()) return
     clientRef.current?.startBackgroundRun(goal.trim())
@@ -446,27 +405,9 @@ export function useCozmoChat() {
     clientRef.current?.listBackgroundRuns()
   }, [])
 
-  const handleListSchedules = useCallback(() => {
-    clientRef.current?.listSchedules()
-  }, [])
-
-  const handleCreateSchedule = useCallback((goal: string, description: string, intervalMinutes: number) => {
-    if (!goal.trim()) return
-    clientRef.current?.createSchedule(goal.trim(), description, intervalMinutes)
-  }, [])
-
-  const handleDeleteSchedule = useCallback((scheduleId: string) => {
-    clientRef.current?.deleteSchedule(scheduleId)
-  }, [])
-
-  const handleToggleSchedule = useCallback((scheduleId: string) => {
-    clientRef.current?.toggleSchedule(scheduleId)
-  }, [])
-
-  const newChat = useCallback((mode: WorkspaceMode = 'chat') => {
+  const newChat = useCallback(() => {
     if (generating) return
     clientRef.current?.reset()
-    setDraftMode(mode)
     setActiveId(DRAFT_ID)
     setInlineSteps([])
     setAgentState(null)
@@ -532,8 +473,8 @@ export function useCozmoChat() {
     : null
 
   const active: Conversation = resolvedActiveId === DRAFT_ID
-    ? { id: DRAFT_ID, title: 'New chat', updatedAt: '', pinned: false, mode: draftMode, messages: [] }
-    : conversations.find((c) => c.id === resolvedActiveId) ?? conversations[0] ?? { id: DRAFT_ID, title: 'New chat', updatedAt: '', pinned: false, mode: draftMode, messages: [] }
+    ? { id: DRAFT_ID, title: 'New chat', updatedAt: '', pinned: false, messages: [] }
+    : conversations.find((c) => c.id === resolvedActiveId) ?? conversations[0] ?? { id: DRAFT_ID, title: 'New chat', updatedAt: '', pinned: false, messages: [] }
 
   return {
     connection,
@@ -547,30 +488,14 @@ export function useCozmoChat() {
     progress,
     plan,
     permission,
-    currentDirectory,
-    permissionMode,
-    recentConversations,
-    agentTask,
     backgroundRuns,
-    schedules,
     sendMessage,
-    setPermissionMode: handleSetPermissionMode,
-    listProjects: handleListProjects,
-    getRecentConversations: handleGetRecentConversations,
-    importFromChat: handleImportFromChat,
-    agentCreateTask: handleAgentCreateTask,
-    selectProject: handleSelectProject,
     startBackgroundRun: handleStartBackgroundRun,
     stopBackgroundRun: handleStopBackgroundRun,
     refreshBackgroundRuns: handleRefreshBackgroundRuns,
-    listSchedules: handleListSchedules,
-    createSchedule: handleCreateSchedule,
-    deleteSchedule: handleDeleteSchedule,
-    toggleSchedule: handleToggleSchedule,
     stop,
     answerPermission,
     answerPlan,
-    setDirectory,
     newChat,
     pinConversation,
     renameConversation,

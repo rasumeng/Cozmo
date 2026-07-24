@@ -23,11 +23,12 @@ export type ServerEvent =
   | { type: 'schedule_toggled'; schedule_id: string; ok: boolean; enabled: boolean }
   | { type: 'directory_set'; path: string; indexed: number }
   | { type: 'projects_list'; projects: Project[] }
-  | { type: 'recent_conversations'; conversations: { id: string; title: string; mode: string; updatedAt: string }[] }
+  | { type: 'recent_conversations'; conversations: { id: string; title: string; updatedAt: string }[] }
   | { type: 'project_created'; project: Project; indexed: number }
   | { type: 'project_selected'; project: Project }
   | { type: 'permission_request'; tool: string; args: Record<string, unknown> }
   | { type: 'reasoning'; text: string }
+  | { type: 'model'; text: string }
   | { type: 'agent_status'; text: string; detail?: string; query?: string }
   | { type: 'progress'; current: number; total: number; label: string }
   | { type: 'agent_state'; current_goal: string; status: string; tools_used: number; error?: string }
@@ -89,13 +90,12 @@ export class CozmoClient {
     return false
   }
 
-  sendChat(content: string, conversationId?: string, attachments?: Attachment[], projectId?: string, mode?: string) {
+  sendChat(content: string, conversationId?: string, attachments?: Attachment[], projectId?: string) {
     const payload: Record<string, unknown> = { type: 'chat', content, conversation_id: conversationId }
     if (attachments?.length) {
       payload.attachments = attachments.map(a => ({ id: a.id, type: a.type, name: a.name, mime: a.mime, size: a.size }))
     }
     if (projectId) payload.project_id = projectId
-    if (mode) payload.mode = mode
     return this.send(payload)
   }
   stop() {
@@ -116,8 +116,8 @@ export class CozmoClient {
   listProjects(search?: string) {
     return this.send({ type: 'list_projects', search })
   }
-  getRecentConversations(mode?: string, limit?: number) {
-    return this.send({ type: 'get_recent_conversations', mode, limit })
+  getRecentConversations(limit?: number) {
+    return this.send({ type: 'get_recent_conversations', limit })
   }
   importFromChat(conversationIds: string[]) {
     return this.send({ type: 'import_from_chat', conversation_ids: conversationIds })
@@ -190,8 +190,7 @@ export async function saveConversation(conv: Conversation): Promise<void> {
       id: conv.id,
       title: conv.title,
       pinned: conv.pinned,
-      mode: conv.mode,
-      messages: conv.messages.map((m: { role: string; content: string; attachments?: Attachment[] }) => ({ role: m.role, content: m.content, attachments: m.attachments })),
+      messages: conv.messages.map((m) => ({ role: m.role, content: m.content, model: m.model, attachments: m.attachments })),
     }),
   })
 }

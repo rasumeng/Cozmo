@@ -9,19 +9,21 @@ import requests
 from . import register_tool
 
 SCREENSHOT_DIR = Path.home() / ".cozmo" / "screenshots"
-OLLAMA_URL = "http://localhost:11434"
+
+
+def _get_ollama_url() -> str:
+    from .. import config
+    cfg = config.load()
+    return cfg.get("ollama", {}).get("url", "http://localhost:11434")
 
 
 def _get_vision_model() -> str:
     from .. import config
-    from ..ollama_util import get_ollama_models, pick_model
     cfg = config.load()
-    model = cfg.get("models", {}).get("vision")
+    model = cfg.get("models", {}).get("vision", "")
     if model:
         return model
-    ollama_url = cfg.get("ollama", {}).get("url", "http://localhost:11434")
-    installed = get_ollama_models(ollama_url)
-    return pick_model(installed, "vision")
+    return ""
 
 
 def _analyze_image(image_path: str, prompt: str = "Describe this image in detail.") -> str:
@@ -30,7 +32,7 @@ def _analyze_image(image_path: str, prompt: str = "Describe this image in detail
             b64 = base64.b64encode(f.read()).decode()
         model = _get_vision_model()
         resp = requests.post(
-            f"{OLLAMA_URL}/api/chat",
+            f"{_get_ollama_url()}/api/chat",
             json={
                 "model": model,
                 "messages": [{

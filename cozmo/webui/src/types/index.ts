@@ -21,43 +21,12 @@ export interface ChatMessage {
   attachments?: Attachment[]
 }
 
-export type WorkspaceMode = 'chat' | 'agent' | 'code'
-
 export interface Conversation {
   id: string
   title: string
   updatedAt: string
   pinned: boolean
-  mode: WorkspaceMode
   messages: ChatMessage[]
-}
-
-export type ActivityStatus = 'running' | 'completed' | 'error'
-
-export interface ActivityStep {
-  id: string
-  icon: string // lucide icon name
-  label: string
-  detail?: string
-  query?: string
-  durationMs?: number
-  status: ActivityStatus
-  startedAt: string
-}
-
-export interface ModelInfo {
-  id: string
-  name: string
-  role: 'chat' | 'coder' | 'vision' | 'research' | 'classifier'
-  sizeGb: number
-  active: boolean
-}
-
-export interface MemoryItem {
-  id: string
-  summary: string
-  createdAt: string
-  tags: string[]
 }
 
 export interface Project {
@@ -70,35 +39,15 @@ export interface Project {
   updatedAt: string
 }
 
-export type PlanStepStatus = 'pending' | 'approved' | 'rejected'
-
 export interface PlanData {
   plan: string
-  status: PlanStepStatus
+  status: 'pending' | 'approved' | 'rejected'
 }
 
 export interface DiffData {
   text: string
   added: number
   removed: number
-}
-
-export interface TerminalEntry {
-  id: string
-  tool: string
-  args: Record<string, unknown>
-  result: string
-  diff?: DiffData
-  timestamp: number
-}
-
-export interface DiffEntry {
-  id: string
-  path: string
-  added: number
-  removed: number
-  diff: DiffData
-  timestamp: number
 }
 
 export interface InlineStep {
@@ -132,14 +81,6 @@ export interface ProgressInfo {
   label: string
 }
 
-export interface PlanStepInfo {
-  id: number
-  description: string
-  tool: string
-  depends_on: number[]
-  status: string
-}
-
 export interface ToolInfo {
   id: string
   name: string
@@ -150,15 +91,6 @@ export interface ToolInfo {
 export interface Skill {
   name: string
   description: string
-}
-
-export interface McpServer {
-  name: string
-  command: string
-  args: string[]
-  env: Record<string, string>
-  enabled: boolean
-  tools?: ToolInfo[]
 }
 
 export interface McpCatalogEnvVar {
@@ -208,16 +140,6 @@ export interface AgentTaskCreate {
   instructions?: string
   files?: AgentTaskFile[]
   location: string
-}
-
-export type AgentStatus = 'idle' | 'planning' | 'executing' | 'waiting' | 'done' | 'error'
-
-export interface AgentToolCall {
-  id: string
-  tool: string
-  args: Record<string, unknown>
-  result: string
-  timestamp: number
 }
 
 export interface AgentConfig {

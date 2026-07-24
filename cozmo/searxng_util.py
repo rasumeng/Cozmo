@@ -1,5 +1,6 @@
 """SearXNG auto-setup and management utilities."""
 
+import os
 import subprocess
 import sys
 import time
@@ -11,9 +12,14 @@ SEARXNG_CONTAINER = "cozmo-searxng"
 SEARXNG_IMAGE = "searxng/searxng"
 SEARXNG_PORT = 8080
 
+DOCKER_DESKTOP_PATHS = [
+    r"C:\Program Files\Docker\Docker\Docker Desktop.exe",
+    r"C:\Program Files\Docker\Docker\resources\Docker Desktop.exe",
+    os.path.expanduser(r"~\AppData\Local\Docker\Docker Desktop\Docker Desktop.exe"),
+]
+
 
 def is_docker_available() -> bool:
-    """Check if Docker is available on the system."""
     try:
         result = subprocess.run(
             ["docker", "--version"],
@@ -24,6 +30,48 @@ def is_docker_available() -> bool:
         return result.returncode == 0
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
+
+
+def is_docker_daemon_reachable() -> bool:
+    try:
+        result = subprocess.run(
+            ["docker", "ps"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        return result.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+
+def _launch_docker_desktop() -> bool:
+    for path in DOCKER_DESKTOP_PATHS:
+        if os.path.isfile(path):
+            print("Docker Desktop not running. Launching...")
+            try:
+                subprocess.Popen([path], shell=True)
+                return True
+            except Exception:
+                pass
+    return False
+
+
+def _wait_for_docker_daemon(timeout: int = 60) -> bool:
+    for _ in range(timeout):
+        if is_docker_daemon_reachable():
+            return True
+        time.sleep(1)
+    return False
+
+
+def ensure_docker_daemon() -> bool:
+    if is_docker_daemon_reachable():
+        return True
+    if sys.platform == "win32" and _launch_docker_desktop():
+        print("Waiting for Docker Desktop to start...")
+        return _wait_for_docker_daemon(120)
+    return False
 
 
 def is_searxng_running(port: int = SEARXNG_PORT, timeout: float = 2) -> bool:
@@ -37,10 +85,12 @@ def is_searxng_running(port: int = SEARXNG_PORT, timeout: float = 2) -> bool:
 
 
 def start_searxng(port: int = SEARXNG_PORT) -> bool:
-    """Start SearXNG container if Docker is available."""
     if not is_docker_available():
-        print("Docker not available. SearXNG will not be auto-started.")
-        print("Install Docker to enable web search (SearXNG).")
+        print("Docker CLI not found. Install Docker to enable web search (SearXNG).")
+        return False
+
+    if not ensure_docker_daemon():
+        print("Docker daemon not reachable. Start Docker Desktop manually.")
         return False
 
     if is_searxng_running(port):
@@ -148,12 +198,11 @@ def get_searxng_status() -> dict:
 
 
 def ensure_searxng(port: int = SEARXNG_PORT) -> str:
-    """Ensure SearXNG is running, auto-start if possible. Returns backend URL or empty string."""
     if is_searxng_running(port):
         return f"http://localhost:{port}"
 
     if is_docker_available():
-        if start_searxng(port):
+        if ensure_docker_daemon() and start_searxng(port):
             return f"http://localhost:{port}"
 
     return ""

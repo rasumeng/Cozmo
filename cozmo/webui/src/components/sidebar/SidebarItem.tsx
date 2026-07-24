@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from 'react'
 import clsx from 'clsx'
-import { Pin, PinOff, MoreHorizontal, Pencil, Trash2, FolderKanban } from 'lucide-react'
-import { Conversation, Project } from '@/types'
+import { Pin, PinOff, MoreHorizontal, Pencil, Trash2 } from 'lucide-react'
+import { Conversation } from '@/types'
 
 export function SidebarItem({
   conversation,
@@ -10,8 +10,6 @@ export function SidebarItem({
   onPin,
   onRename,
   onDelete,
-  projects,
-  onAddToProject,
 }: {
   conversation: Conversation
   active: boolean
@@ -19,8 +17,6 @@ export function SidebarItem({
   onPin: (id: string) => void
   onRename: (id: string, title: string) => void
   onDelete: (id: string) => void
-  projects?: Project[]
-  onAddToProject?: (convId: string, projId: string) => void
 }) {
   const [menuOpen, setMenuOpen] = useState(false)
   const [renaming, setRenaming] = useState(false)
@@ -115,22 +111,6 @@ export function SidebarItem({
             <Pencil size={14} />
             Rename
           </button>
-          {projects && projects.length > 0 && (
-            <>
-              <div className="border-t border-base-700 my-1" />
-              <div className="px-3 py-1 text-[11px] text-base-500">Add to project</div>
-              {projects.map(p => (
-                <button
-                  key={p.id}
-                  onClick={(e) => { e.stopPropagation(); onAddToProject?.(conversation.id, p.id); setMenuOpen(false) }}
-                  className="w-full flex items-center gap-2 px-3 py-1.5 text-sm text-base-300 hover:bg-base-800 hover:text-base-100"
-                >
-                  <FolderKanban size={14} />
-                  <span className="truncate">{p.name}</span>
-                </button>
-              ))}
-            </>
-          )}
           <div className="border-t border-base-700 my-1" />
           <button
             onClick={(e) => { e.stopPropagation(); onDelete(conversation.id); setMenuOpen(false) }}

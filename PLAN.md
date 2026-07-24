@@ -1,132 +1,235 @@
 # Cozmo Development Plan
 
-## Active Roadmap
+## Architecture v3 — Task-Based Execution
 
-The vision is three distinct layers:
-
-```
-Cozmo Core
-   |
-Session Manager
-   |
-├── Chat  → ChatHandler   → LLM (fast path, no tools/plan/memory)
-├── Agent → AgentRuntime  → Planner → Tools → Memory → State
-└── Code  → CodeRuntime   → FileOps → Terminal → Diff Review
-```
-
-Current reality: Chat and Agent share the same monolithic ReAct loop. This plan fixes that.
-
----
-
-### Phase 1: Separate the Identities (Current)
-
-**Goal:** Make Chat, Agent, and Code actually different.
-
-| # | Task | Why | Files |
-|---|------|-----|-------|
-| 1.1 | **ChatHandler** — lightweight conversational path | Every chat message pays agent overhead (routing, memory, skills, tool framework). This strips it to: `message → model → stream`. | NEW `core/chat/__init__.py`, NEW `core/chat/handler.py` |
-| 1.2 | **AgentRuntime** — refactor runtime into agent directory | `runtime.py` (881 lines) does everything. Extract agent-role logic into `core/agent/runtime.py` with its own state management. | NEW `core/agent/__init__.py`, NEW `core/agent/runtime.py`, EDIT `core/runtime.py` (thin coordinator) |
-| 1.3 | **Router decoupling** — extract `_route()` from runtime | Router should be a standalone function, not a method on CozmoRuntime. Repurpose dead `core/router.py`. | REWRITE `core/router.py`, EDIT `core/runtime.py` |
-| 1.4 | **AgentState** — persistent cognitive state | Agent loses all state on restart. No goal tracking, no plan progress, no cross-session continuity. | NEW `core/agent/state.py` |
-| 1.5 | **Structured Planner** — replace inline plan text | Plans are plain text stuffed into prompts. No step tracking, no dependency resolution, no pause/resume. | NEW `core/agent/planner.py`, EDIT `core/agent/runtime.py` |
-
----
-
-### Phase 2: Make Agent Actually Agentic
-
-**Goal:** Cognitive continuity — agent maintains goals, learns from failures, adapts plans.
-
-| # | Task | Why |
-|---|------|-----|
-| 2.1 | **EventBus** — decouple monitoring from yield tuples | UI/logging/tracking coupled to inline yields. Cannot add background monitoring or activity feed without this. |
-| 2.2 | **Reflector + LessonStore** — learn from failures | Errors vanish after the turn. No retry strategy, no pattern learning. |
-| 2.3 | **PlanExecutor** — step-by-step execution with dependency resolution | Planner generates plans. Executor runs them with retry, partial failure recovery, replanning. |
-| 2.4 | **Pause/Resume** — save/restore execution state | Multi-step tasks interrupted by max_steps or session close cannot resume. |
-
----
-
-### Phase 3: Memory Engine — LanceDB + Sentence Transformers + OKF
-
-**Goal:** LLM reasons, memory engine searches. High-quality persistent memory.
-
-| # | Task | Why |
-|---|------|-----|
-| 3.1 | **LanceStore** — replace ChromaDB | ChromaDB's client/server overhead. LanceDB is local-first, disk-backed, native hybrid search. |
-| 3.2 | **Sentence Transformers** — replace OllamaEmbeddings | Lighter, CPU-friendly, pre-loaded once. 384-dim vectors keep index small. |
-| 3.3 | **OKF classification pipeline** | Every stored memory has type, title, tags, importance score, source. Index files enable progressive disclosure. |
-| 3.4 | **Knowledge base indexing** | `read_knowledge`/`write_knowledge` files are flat text with no vector search. Index them. |
-| 3.5 | **RAG pipeline** — query rewriting, chunking, reranking, citation tracking | Basic vector search is not RAG. |
-
----
-
-### Phase 4: Advanced Agent Features
-
-| # | Task | Why |
-|---|------|-----|
-| 4.1 | **Tool Risk Levels** (LOW/MEDIUM/HIGH/CRITICAL) | Flat allow/ask/deny cannot express "auto-allow safe, ask for risky, deny critical." |
-| 4.2 | **Agent Router Profiles** | Different tasks need different models/tools/prompts. Profile dispatch within agent mode. |
-| 4.3 | **LLM Provider Abstraction** | Ollama lock-in prevents using OpenAI, Anthropic, etc. |
-| 4.4 | **Subagent Polish** — recursion limits, shared memory, structured output | `task()` tool spawns naked runtimes. No isolation, no context sharing. |
-| 4.5 | **Scheduled Autonomous Runs** | Scheduler exists but not wired to AgentState or Planner. |
-
----
-
-## Implementation Order (Next Session)
+Cozmo transitions from a **mode-based multi-assistant** (Chat/Agent/Code with separate pipelines)
+to a **task-based single intelligent system**. Every user request becomes a `Task`.
+The system determines intent, complexity, strategy, tools, and model — the user never chooses a mode.
 
 ```
-PHASE 1 (Current — Separate Identities):
-  ├─ 1.1: ChatHandler                    [core/chat/handler.py]
-  ├─ 1.2: AgentRuntime + agent/ dir      [core/agent/runtime.py]
-  ├─ 1.3: Router decoupling              [core/router.py]
-  ├─ 1.4: AgentState                     [core/agent/state.py]
-  └─ 1.5: Structured Planner             [core/agent/planner.py]
-
-PHASE 2 (Agentic Agent):
-  ├─ 2.1: EventBus                       [core/agent/event_bus.py]
-  ├─ 2.2: Reflector + LessonStore        [core/agent/reflector.py]
-  ├─ 2.3: PlanExecutor                   [core/agent/planner.py]
-  └─ 2.4: Pause/Resume                   [core/agent/state.py]
-
-PHASE 3 (Memory Rewrite):
-  ├─ 3.1: LanceStore                     [memory/lancedb_store.py]
-  ├─ 3.2: Sentence Transformers          [memory/manager.py]
-  ├─ 3.3: OKF pipeline                   [memory/manager.py]
-  ├─ 3.4: Knowledge indexing             [tools/file_ops.py]
-  └─ 3.5: RAG pipeline                   [memory/rag.py]
-
-PHASE 4 (Advanced):
-  ├─ 4.1: Tool Risk Levels               [tools/__init__.py, permissions.py]
-  ├─ 4.2: Agent Profiles                 [core/agent/profiles.py]
-  ├─ 4.3: LLM Provider ABC               [core/llm.py]
-  ├─ 4.4: Subagent polish                [tools/task.py]
-  └─ 4.5: Scheduled runs                 [scheduler.py, agent/state.py]
+                        ┌──────────────────┐
+                        │   Event Bus      │
+                        │  (central pub/sub)│
+                        └──────────────────┘
+                               │
+User Message → Orchestrator → JobManager → Engine (stateless)
+                    │              │
+               IntentDetector  Job lifecycle
+               GoalExtractor   (pause/resume/
+               PolicyEngine     cancel/retry/
+               Complexity       checkpoint)
+               CapabilityReg
+               ModelRouter
 ```
+
+### Core Concepts
+
+| Concept | Role |
+|---------|------|
+| **Task** | Universal currency. Every request creates one. Has id, goal, status, execution history. |
+| **Goal** | What to accomplish. Extracted from user message, resolved via memory for continuations. |
+| **Intent** | Kind of work (CODING, RESEARCH, CONVERSATION, PLANNING, VISION). |
+| **Job** | Execution instance of a Task. Stateless Engine receives a Job and streams events. |
+| **Capability** | Declarative unit of functionality (tools, models, permissions, planner strategy). |
+| **WorkspaceContext** | Active project state: directory, files, git status, current objectives. |
+
+### Architecture Principles
+
+1. **Task is universal currency** — not conversations, not messages, not modes.
+2. **Orchestrator is thin** — coordinates, does NOT execute. Delegates everything.
+3. **Engine is stateless** — pure ReAct loop. No knowledge of modes, tasks, or intents.
+4. **Everything speaks through events** — components subscribe to EventBus.
+5. **Policy gates all action** — no destructive operation bypasses policy check.
+6. **Memory enriches early** — context resolution precedes planning.
+7. **Capabilities are composable** — each has tools, permissions, model needs, risk.
+8. **Model routing is resource-aware** — considers VRAM, loaded models, latency.
 
 ---
 
-## Key Architecture Decisions
+## Migration Plan (6 Phases)
 
-1. **Chat never pays agent tax** — no routing, no tools, no memory queries, no planning. Pure `model + history → answer`.
-2. **Agent owns cognitive state** — goals, plans, observations, failures persisted across sessions.
-3. **Planner generates structured plans** — typed Plan/PlanStep dataclasses, not text in prompts.
-4. **EventBus decouples monitoring** — runtime emits typed events; WebSocket/TUI/logging subscribe independently.
-5. **Reflector learns from failures** — error classification, retry strategies, LessonStore persists patterns.
-6. **LanceDB over ChromaDB** — local-first, disk-backed, no daemon. Native hybrid search (vector + FTS).
-7. **LLM reasons, memory engine searches** — memory retrieval is a pre-pipeline, not a runtime call.
-8. **OKF-classified memories** — type, title, tags, importance, source on every entry.
-9. **No database** — everything file-based: `~/.cozmo/chats/`, `~/.cozmo/projects/`, `~/.cozmo/memory/`, `~/.cozmo/agent_state/`.
-10. **Three independent modes** — Chat, Agent, Code have separate handlers, not a shared loop with empty tool gates.
+### Phase 0: Foundation (COMPLETE)
+**No behavior change.** Restructure directories, create dataclass types, set up aliases.
+
+Create:
+- `cozmo/runtime/` — core execution (engine.py, event_bus.py, session.py, model_router.py, resources.py, etc.)
+- `cozmo/orchestrator/` — task_types.py (Task, Goal, TaskProfile, ExecutionPlan, ExecutionHistory)
+- `cozmo/jobs/` — job.py (Job, JobStatus, Checkpoint)
+- `cozmo/capabilities/` — registry.py, base.py, builtin.py
+- `cozmo/planner/` — llm_planner.py (moved from core/agent/)
+- `cozmo/runtime/workspace.py` — WorkspaceContext (active project state)
+
+Keep:
+- `cozmo/core/` as alias → `cozmo/runtime/` (all existing imports work)
+- `force_mode` as developer debugging compatibility layer
+- All existing agent/ files in place (will be migrated in Phase 1-4)
+
+Add:
+- `force_capability` / `force_model` parameters (developer override, not user-facing)
+
+### Phase 1: Unified Pipeline
+**Core migration.** The ReAct loop no longer branches on mode.
+
+- Replace `core/router.py` with `orchestrator/intent.py` (IntentDetector)
+- Build `orchestrator/complexity.py` (ComplexityEstimator)
+- Build `orchestrator/orchestrator.py` (lightweight coordinator, ~150 lines)
+- Remove mode branching from `engine.py` (`_MODE_DISCIPLINE`, `_tool_gate`, per-mode temps)
+- Remove `force_mode` from pipeline (keep as deprecated compat for 1 release)
+- Build `runtime/model_router.py` (capability-based model selection)
+- Build `capabilities/builtin.py` (Python-based capability definitions)
+- Unify `webui_server.py` pipeline (no more force_mode passthrough)
+
+### Phase 2: Job Manager + Pause/Resume
+**Long-running tasks become proper Job objects.**
+
+- `jobs/manager.py` — JobManager (submit, pause, resume, cancel, retry)
+- `jobs/persistence.py` — save/load Jobs and Checkpoints
+- Engine yields checkpoint events periodically
+- Continuation ("keep going") loads Task + last Job checkpoint
+- Background runs unified with foreground JobManager
+
+### Phase 3: Safety + Awareness
+**Policy gates all tasks. Resource tracking.**
+
+- `orchestrator/policy.py` — PolicyEngine (permission mode, destructive patterns, workspace trust)
+- `runtime/resources.py` — ResourceManager (VRAM, loaded models, concurrency)
+- ModelRouter consults ResourceManager before selecting model
+
+### Phase 4: Capability-Based Tool Selection
+**Tools driven by capability resolution, not mode gating.**
+
+- `capabilities/registry.py` — resolves task profile → capability list → tool set
+- Remove `_tool_gate` completely
+- Any tool available to any task if capability supports it
+
+### Phase 5: Frontend Redesign (COMPLETE)
+**No mode tabs. Workspace navigation.**
+
+- Removed `WorkspaceMode`, `WorkspaceTabs`, `workspaceModes.ts`
+- Built `WorkspaceNav`: Conversations | Projects | Memory | Knowledge | Settings
+- Unified LandingPage (no per-mode colors/logos)
+- Simplified PromptInput (no mode-conditioned UI)
+- Removed mode from WebSocket protocol, conversation persistence
+
+### Phase 6: Polish + Data Migration (COMPLETE)
+**Clean up. Migrate. Release.**
+
+- `cozmo migrate v1-to-v2` — strips `mode` from persisted conversations
+- Deleted `cozmo/core/`, `cozmo/core/agent/`, `cozmo/core/chat/`
+- Removed old sidebar components (WorkspaceTabs.tsx)
+- Updated docs, bumped version to 0.2.0
+
+---
+
+## Directory Structure (Target)
+
+```
+cozmo/
+├── orchestrator/       # Coordination — thin, delegates everything
+│   ├── orchestrator.py # Event stitcher
+│   ├── intent.py       # IntentDetector + GoalExtractor
+│   ├── complexity.py   # ComplexityEstimator
+│   ├── policy.py       # PolicyEngine
+│   └── task_types.py   # Task, Goal, TaskProfile, ExecutionPlan, ExecutionHistory
+│
+├── capabilities/       # Declarative capability system (Python first → TOML)
+│   ├── registry.py     # CapabilityRegistry
+│   ├── base.py         # Capability dataclass
+│   ├── builtin.py      # Built-in capabilities
+│   └── reflection.py   # Per-capability lesson stores
+│
+├── planner/            # Hybrid planning
+│   ├── planner.py      # HybridPlanner (dispatcher)
+│   ├── templates.py    # Level 1: template plans
+│   ├── heuristics.py   # Level 2: workflow patterns
+│   ├── llm_planner.py  # Level 3: LLM plans (moved from core/agent/)
+│   └── plan.py         # Plan, PlanStep dataclasses
+│
+├── jobs/               # Job lifecycle
+│   ├── manager.py      # JobManager
+│   ├── job.py          # Job, JobStatus, Checkpoint
+│   └── persistence.py  # Checkpoint persistence
+│
+├── runtime/            # Execution fundamentals
+│   ├── engine.py       # Stateless ReAct loop
+│   ├── event_bus.py    # Central pub/sub
+│   ├── session.py      # SessionState (generalized from AgentState)
+│   ├── workspace.py    # WorkspaceContext (active project state)
+│   ├── model_router.py # Cost-aware model selection
+│   ├── resources.py    # VRAM/model/concurrency tracking
+│   ├── prompts.py      # System prompt builder
+│   ├── context.py      # Token estimation
+│   ├── tool_registry.py
+│   ├── tool_risk.py
+│   ├── permissions.py
+│   └── reflection.py   # Error reflection (always on)
+│
+├── providers/          # LLM providers
+├── memory/             # Memory (knowledge + retrieval)
+├── tools/              # Tool implementations
+├── webui/              # React frontend
+├── config.py           # Config
+└── cli.py              # CLI entry point
+```
 
 ---
 
 ## Completed
 
-- File & image attachments (upload, paste, drag-drop, thumbnails)
-- Projects (CRUD, shared context, conversation linking)
-- Skills system (SKILL.md format, CRUD, skill-creator seed)
-- Connectors/MCP (config CRUD, catalog, status, tool discovery)
-- WebUI Code mode (Terminal panel, Diff panel, DirectoryPicker, RightPanel)
-- Per-Mode Input Bars + Collab Project Management
-- MCP tool integration (stdio, auto-discovery, health checks)
-- Background task queue + scheduler
-- Subagent spawning (explore/scout/general + custom agents)
+- Phase 0 architecture restructuring
+- Task/Goal/Job dataclass types
+- WorkspaceContext, EventBus, Session
+- Runtime/Engine/ModelRouter/ResourceManager skeletons
+- Backward-compat core/ → runtime/ stubs
+- force_capability / force_model config params
+- **Phase 1: Unified pipeline**
+  - `orchestrator/intent.py` — IntentDetector + GoalExtractor (replaces core/router.py)
+  - `orchestrator/complexity.py` — ComplexityEstimator (heuristic-based)
+  - `orchestrator/orchestrator.py` — lightweight coordinator (~150 lines)
+  - `runtime/runtime.py` — removed `_MODE_DISCIPLINE`, `_tool_gate`, per-mode temps
+  - `runtime/runtime.py` — unified ReAct loop (no agent/research mode branching)
+  - `runtime/runtime.py` — `force_mode` deprecated (logged, ignored for routing)
+  - `webui_server.py` — removed `force_mode` passthrough, unify pipeline
+  - `core/router.py` — deprecated re-export stub
+- **Phase 2: Job Manager + Pause/Resume**
+  - `jobs/manager.py` — JobManager (submit, pause, resume, cancel, retry, start, complete)
+  - `jobs/persistence.py` — JobStore (JSON file persistence for jobs and checkpoints)
+  - `runtime/engine.py` — checkpoint_interval + Checkpoint events + resume support
+  - `orchestrator/continuation.py` — ContinuationHandler (continue task, retry job, build EngineContext)
+  - `core/` — backward-compat stubs for JobManager, JobStore, ContinuationHandler
+
+- **Phase 3: Safety + Awareness**
+  - `orchestrator/policy.py` — PolicyEngine with 3 modes (relaxed/normal/strict)
+  - Policy: destructive command detection (rm -rf, format, sudo rm, batch delete)
+  - Policy: workspace trust evaluation (git repo, package.json, etc.)
+  - Policy: risk-based decisions (LOW auto-allow, CRITICAL deny, MEDIUM/HIGH ask)
+  - `runtime/resources.py` — full ResourceManager with concurrency gating
+  - ResourceManager: VRAM tracking, model load/unload with OOM prevention
+  - ResourceManager: LRU eviction, `best_available()` ranking
+  - ResourceManager: job reservation (`reserve_job` / `release_job`)
+  - `runtime/model_router.py` — consults ResourceManager for VRAM/loaded status
+  - ModelRouter: prefers loaded models, falls back through capability chain
+  - `core/policy.py` — backward-compat stub
+
+- **Phase 4: Capability-Based Tool Selection**
+  - `runtime/runtime.py` — `_tools_for_mode` accepts `allowed_tools` list from capability resolution
+  - `runtime/runtime.py` — `run_stream` resolves capabilities via `CapabilityRegistry.get_tool_names()`
+  - `runtime/runtime.py` — `run_stream` selects model via `ModelRouter.resolve()` using capability
+  - `runtime/runtime.py` — `_INTENT_TO_CAP_IDS` maps intent strings to capability IDs
+  - `runtime/model_manager.py` — `bind_model()` and `client_for_model()` bypass role-based model selection
+  - `runtime/model_manager.py` — `_get_provider_for_model()` creates provider for explicit model name
+   - Pipeline: intent → capability IDs → tool names → filtered tools → model name → execution
+
+- **Phase 5: Frontend Redesign**
+  - Removed `WorkspaceMode`, `WorkspaceTabs`, `workspaceModes.ts`
+  - Built `WorkspaceNav`: Conversations | Projects | Memory | Knowledge | Settings
+  - Unified LandingPage, simplified PromptInput
+  - Removed mode from WebSocket protocol, conversation persistence
+  - Stripped mode from all frontend files (types, hooks, services, components, fixtures)
+  - TypeScript compiles clean with zero mode references
+
+- **Phase 6: Polish + Data Migration**
+  - Deleted `cozmo/core/` (all backward-compat stubs + old agent/chat/providers code)
+  - Updated `cli.py` imports from `cozmo.core.*` → `cozmo.runtime.*`
+  - `cozmo migrate v1-to-v2` — strips `mode` from persisted conversations
+  - Bumped version to 0.2.0

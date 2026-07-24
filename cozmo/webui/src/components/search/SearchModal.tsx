@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Search, X, MessageSquare, Bot, TerminalSquare } from 'lucide-react'
+import { Search, X, MessageSquare } from 'lucide-react'
 
 const API_BASE = import.meta.env.DEV ? 'http://localhost:8765' : ''
 
@@ -18,11 +18,7 @@ interface Props {
   onSelect: (id: string) => void
 }
 
-const MODE_ICONS: Record<string, React.ElementType> = {
-  chat: MessageSquare,
-  agent: Bot,
-  code: TerminalSquare,
-}
+
 
 export function SearchModal({ open, onClose, onSelect }: Props) {
   const [query, setQuery] = useState('')
@@ -117,14 +113,13 @@ export function SearchModal({ open, onClose, onSelect }: Props) {
                 </div>
               )}
               {results.map((r) => {
-                const Icon = MODE_ICONS[r.mode] ?? MessageSquare
                 return (
                   <button
                     key={r.id}
                     onClick={() => { onSelect(r.id); onClose() }}
                     className="w-full flex items-start gap-3 px-4 py-3 text-left hover:bg-base-800 transition-colors border-b border-base-800/50 last:border-0"
                   >
-                    <Icon size={14} className="text-base-500 shrink-0 mt-1" />
+                    <MessageSquare size={14} className="text-base-500 shrink-0 mt-1" />
                     <div className="flex-1 min-w-0">
                       <p className="text-sm text-base-100 truncate">{r.title}</p>
                       <p className="text-[11px] text-base-500 line-clamp-2 mt-0.5 leading-relaxed">

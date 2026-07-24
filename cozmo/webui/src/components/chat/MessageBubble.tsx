@@ -22,7 +22,6 @@ export function MessageBubble({ message }: { message: ChatMessage }) {
       transition={{ duration: 0.25 }}
       className={clsx('flex flex-col gap-1.5', isUser ? 'items-end' : 'items-start')}
     >
-      {!isUser && message.model && <ModelBadge model={message.model} />}
       {message.streaming && (
         <div className="flex items-center gap-1.5 px-1 pb-1">
           <span className="w-1.5 h-1.5 rounded-full bg-accent animate-glow" />
@@ -81,7 +80,10 @@ export function MessageBubble({ message }: { message: ChatMessage }) {
             </div>
           ))}
         </div>
-      <span className="text-[11px] text-base-500 px-1">{message.createdAt}</span>
+      <span className="text-[11px] text-base-500 px-1 flex items-center gap-1.5">
+        {!isUser && message.model && <ModelBadge model={message.model} />}
+        {message.createdAt}
+      </span>
     </motion.div>
   )
 }

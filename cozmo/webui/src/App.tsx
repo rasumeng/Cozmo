@@ -1,20 +1,28 @@
 import { useState, useCallback } from 'react'
 import { Sidebar } from '@/components/sidebar/Sidebar'
 import { Conversation } from '@/components/chat/Conversation'
-import { PermissionModal } from '@/components/common/PermissionModal'
 import { ProjectsPanel } from '@/components/projects/ProjectsPanel'
+import { JobsPage } from '@/components/jobs/JobsPage'
 
 import { SettingsModal, SectionId } from '@/components/settings/SettingsModal'
 import { useCozmoChat } from '@/hooks/useCozmoChat'
-import { WorkspaceMode } from '@/types'
+import type { NavItemId } from '@/components/sidebar/workspaceModes'
 
 export default function App() {
   const [collapsed, setCollapsed] = useState(false)
-  const [showProjects, setShowProjects] = useState(false)
+  const [activeSection, setActiveSection] = useState<NavItemId>('conversations')
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [settingsSection, setSettingsSection] = useState<SectionId>('models')
-  const [pendingSkillTrigger, setPendingSkillTrigger] = useState(false)
   const chat = useCozmoChat()
+
+  const handleSectionChange = useCallback((id: NavItemId) => {
+    if (id === 'settings') {
+      setSettingsSection('models')
+      setSettingsOpen(true)
+      return
+    }
+    setActiveSection(id)
+  }, [])
 
   const handleOpenSettings = useCallback((section?: SectionId) => {
     if (section) setSettingsSection(section)
@@ -22,13 +30,57 @@ export default function App() {
   }, [])
 
   const handleCreateSkill = useCallback(() => {
-    setPendingSkillTrigger(true)
+    setSettingsSection('skills')
+    setSettingsOpen(true)
   }, [])
 
-  const handleTabChange = useCallback((mode: WorkspaceMode) => {
-    chat.newChat(mode)
-    setShowProjects(false)
-  }, [chat])
+  const renderSection = () => {
+    switch (activeSection) {
+      case 'projects':
+        return (
+          <ProjectsPanel
+            projects={chat.projects}
+            conversations={chat.conversations}
+            onCreateProject={chat.createProject}
+            onUpdateProject={chat.updateProject}
+            onDeleteProject={chat.deleteProject}
+            onSelectConversation={(id) => { chat.setActiveId(id); setActiveSection('conversations') }}
+            onRemoveConversation={chat.removeConversationFromProject}
+            onSelectProject={chat.setActiveProjectId}
+          />
+        )
+      case 'jobs':
+        return (
+          <JobsPage
+            runs={chat.backgroundRuns}
+            onStart={chat.startBackgroundRun}
+            onStop={chat.stopBackgroundRun}
+            onRefresh={chat.refreshBackgroundRuns}
+          />
+        )
+      default:
+        return (
+          <Conversation
+            conversation={chat.active}
+            connection={chat.connection}
+            generating={chat.generating}
+            inlineSteps={chat.inlineSteps}
+            plan={chat.plan}
+            permission={chat.permission}
+            agentState={chat.agentState}
+            progress={chat.progress}
+            activeProject={chat.activeProject}
+            backgroundRuns={chat.backgroundRuns}
+            onSend={chat.sendMessage}
+            onStop={chat.stop}
+            onApprovePlan={() => chat.answerPlan(true)}
+            onRejectPlan={() => chat.answerPlan(false)}
+            onAnswerPermission={chat.answerPermission}
+            onOpenSettings={handleOpenSettings}
+          />
+        )
+    }
+  }
 
   return (
     <div className="h-screen w-screen flex bg-base-950 text-base-100 overflow-hidden relative">
@@ -40,64 +92,16 @@ export default function App() {
           conversations={chat.conversations}
           activeId={chat.activeId}
           onSelect={chat.setActiveId}
-          onNewChat={(mode?: WorkspaceMode) => chat.newChat(mode)}
-          onTabChange={handleTabChange}
+          onNewChat={() => { chat.newChat(); setActiveSection('conversations') }}
           onPin={chat.pinConversation}
           onRename={chat.renameConversation}
           onDelete={chat.deleteConversation}
-          projects={chat.projects}
-          showProjects={showProjects}
-          onToggleProjects={() => setShowProjects(v => !v)}
-          onAddToProject={chat.addConversationToProject}
-          settingsOpen={settingsOpen}
-          onOpenSettings={() => handleOpenSettings()}
-          onCloseSettings={() => setSettingsOpen(false)}
+          activeSection={activeSection}
+          onSectionChange={handleSectionChange}
+          jobsCount={chat.backgroundRuns.length}
         />
-        {showProjects ? (
-          <ProjectsPanel
-            projects={chat.projects}
-            conversations={chat.conversations}
-            onCreateProject={chat.createProject}
-            onUpdateProject={chat.updateProject}
-            onDeleteProject={chat.deleteProject}
-            onSelectConversation={(id) => { chat.setActiveId(id); setShowProjects(false) }}
-            onRemoveConversation={chat.removeConversationFromProject}
-            onSelectProject={chat.setActiveProjectId}
-          />
-        ) : (
-          <Conversation
-            conversation={chat.active}
-            connection={chat.connection}
-            generating={chat.generating}
-            inlineSteps={chat.inlineSteps}
-            plan={chat.plan}
-            onSend={chat.sendMessage}
-            onStop={chat.stop}
-            onApprovePlan={() => chat.answerPlan(true)}
-            onRejectPlan={() => chat.answerPlan(false)}
-            activeConversationId={chat.activeId && chat.activeId !== '__draft__' ? chat.activeId : undefined}
-            projects={chat.projects}
-            onAddToProject={chat.addConversationToProject}
-            onOpenProjectPanel={() => setShowProjects(true)}
-            onOpenSettings={handleOpenSettings}
-            onCreateSkillTrigger={() => setPendingSkillTrigger(true)}
-            pendingSkillTrigger={pendingSkillTrigger}
-            onConsumeSkillTrigger={() => setPendingSkillTrigger(false)}
-            currentDirectory={chat.currentDirectory}
-            onSetDirectory={chat.setDirectory}
-            permissionMode={chat.permissionMode}
-            onSetPermissionMode={chat.setPermissionMode}
-            agentTask={chat.agentTask}
-            onListProjects={chat.listProjects}
-            onSelectProject={chat.selectProject}
-            onCreateTask={chat.agentCreateTask}
-            onImportChat={chat.importFromChat}
-          />
-        )}
+        {renderSection()}
       </div>
-      {chat.permission && (
-        <PermissionModal request={chat.permission} onAnswer={chat.answerPermission} />
-      )}
       <SettingsModal
         open={settingsOpen}
         onClose={() => setSettingsOpen(false)}

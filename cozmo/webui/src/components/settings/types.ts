@@ -1,4 +1,4 @@
-export type SectionId = 'models' | 'tools' | 'memory' | 'skills' | 'connectors' | 'general' | 'agent'
+export type SectionId = 'general' | 'models' | 'memory' | 'knowledge' | 'tools' | 'mcp' | 'skills' | 'integrations' | 'appearance' | 'advanced'
 
 export interface ToolInfo {
   id: string
@@ -37,7 +37,19 @@ export interface AgentConfig {
   [key: string]: unknown
 }
 
+export interface LlmRoleSpec {
+  model?: string
+  provider?: string
+}
+
+export interface LlmConfig {
+  max_tokens?: number
+  default_model?: string
+  roles?: Record<string, LlmRoleSpec | string>
+}
+
 export interface SettingsData {
+  llm?: LlmConfig
   models: Record<string, unknown>
   ollama?: { url?: string }
   providers?: { default?: string; ollama?: { url?: string }; openai?: { api_key_env?: string } }

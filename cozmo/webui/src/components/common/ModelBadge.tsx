@@ -4,8 +4,10 @@ const MODEL_COLORS: Record<string, string> = {
   coder: 'bg-violet-500/10 text-violet-400 border-violet-500/20',
   chat: 'bg-accent/10 text-accent border-accent/20',
   vision: 'bg-secondary/10 text-secondary border-secondary/20',
-  research: 'bg-cyan-500/10 text-cyan-400 border-cyan-500/20',
-  classifier: 'bg-base-600/10 text-base-400 border-base-600/20',
+  planner: 'bg-cyan-500/10 text-cyan-400 border-cyan-500/20',
+  classifier: 'bg-amber-500/10 text-amber-400 border-amber-500/20',
+  router: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20',
+  orchestrator: 'bg-rose-500/10 text-rose-400 border-rose-500/20',
 }
 
 export function ModelBadge({ model }: { model: string }) {

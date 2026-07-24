@@ -1,27 +1,31 @@
-import { Cpu, Wrench, Brain, Puzzle, Cable, Settings, Bot, FileText, GitBranch, Globe, Database, Lightbulb, Calendar, Mail, MessageSquare, Map, Search, Activity, Image, Server, Cloud } from 'lucide-react'
+import { Cpu, Wrench, Brain, BookOpen, Puzzle, Cable, Settings, Shield, PuzzleIcon, Palette, Server, CpuIcon, Lightbulb, FileText, GitBranch, Globe, Database, Calendar, Mail, MessageSquare, Map, Search, Activity, Image, Cloud } from 'lucide-react'
 import type { SectionId } from './types'
 
 export const SECTIONS: { id: SectionId; label: string; icon: React.ElementType }[] = [
-  { id: 'models', label: 'Models', icon: Cpu },
-  { id: 'agent', label: 'Agent', icon: Bot },
-  { id: 'tools', label: 'Tools', icon: Wrench },
-  { id: 'memory', label: 'Memory', icon: Brain },
-  { id: 'skills', label: 'Skills', icon: Puzzle },
-  { id: 'connectors', label: 'Connectors', icon: Cable },
   { id: 'general', label: 'General', icon: Settings },
+  { id: 'models', label: 'Models', icon: Cpu },
+  { id: 'memory', label: 'Memory', icon: Brain },
+  { id: 'knowledge', label: 'Knowledge', icon: BookOpen },
+  { id: 'tools', label: 'Tools', icon: Wrench },
+  { id: 'mcp', label: 'MCP Servers', icon: Cable },
+  { id: 'skills', label: 'Skills', icon: Puzzle },
+  { id: 'integrations', label: 'Integrations', icon: PuzzleIcon },
+  { id: 'appearance', label: 'Appearance', icon: Palette },
+  { id: 'advanced', label: 'Advanced', icon: Server },
 ]
 
-export const BUILTIN_ROLES = ['chat', 'coder', 'vision', 'research', 'classifier', 'agent'] as const
+export const BUILTIN_ROLES = ['classifier', 'router', 'orchestrator', 'chat', 'coder', 'planner', 'vision'] as const
 
 export const INTERNAL_KEYS = ['max_tokens'] as const
 
 export const PRESET_META: Record<string, { label: string; desc: string }> = {
+  classifier: { label: 'Classifier', desc: 'Intent detection & message classification' },
+  router: { label: 'Router', desc: 'Task routing and capability dispatch' },
+  orchestrator: { label: 'Orchestrator', desc: 'Multi-step plan generation' },
   chat: { label: 'Chat', desc: 'General conversation & Q&A' },
   coder: { label: 'Coder', desc: 'Code generation & editing' },
+  planner: { label: 'Planner', desc: 'Deep research & task planning' },
   vision: { label: 'Vision', desc: 'Image analysis & vision tasks' },
-  research: { label: 'Research', desc: 'Deep research & search' },
-  classifier: { label: 'Classifier', desc: 'Text classification & sentiment analysis' },
-  agent: { label: 'Agent', desc: 'Autonomous multi-step task execution' },
 }
 
 export const PERM_MODES = ['allow', 'ask', 'deny'] as const

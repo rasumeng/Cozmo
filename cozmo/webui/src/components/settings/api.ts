@@ -24,3 +24,11 @@ export async function fetchOllamaModels(): Promise<string[]> {
   } catch {}
   return []
 }
+
+export async function fetchAvailableModels(): Promise<{ name: string; provider: string }[]> {
+  try {
+    const r = await fetch(`${API_BASE}/api/models/available`)
+    if (r.ok) return r.json()
+  } catch {}
+  return []
+}

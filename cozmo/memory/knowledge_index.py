@@ -17,8 +17,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from sentence_transformers import SentenceTransformer
-
+from ..services import EmbeddingService, RerankerService
+from .. import config as cozmo_config
 from .lancedb_store import LanceStore
 
 log = logging.getLogger("cozmo.memory.knowledge")
@@ -98,7 +98,10 @@ def _chunk_with_overlap(text: str, max_chars: int = 1000, overlap_chars: int = 1
 class Reranker:
     """Cross-encoder reranker. Lazy-loaded model, cached across calls."""
 
-    def __init__(self, model_name: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"):
+    def __init__(self, model_name: str | None = None):
+        if model_name is None:
+            cfg = cozmo_config.load()
+            model_name = cfg.get("reranker", {}).get("model", "cross-encoder/ms-marco-MiniLM-L-6-v2")
         self.model_name = model_name
         self._model = None
 
@@ -139,15 +142,23 @@ class KnowledgeIndex:
         self,
         knowledge_dir: str | Path = "./knowledge",
         persist_dir: Optional[str | Path] = None,
-        embed_model: str = "all-MiniLM-L6-v2",
-        rerank_model: Optional[str] = "cross-encoder/ms-marco-MiniLM-L-6-v2",
+        embed_model: str | EmbeddingService | None = None,
+        rerank_model: Optional[str | RerankerService] = None,
     ):
         self.knowledge_dir = Path(knowledge_dir).resolve()
-        self._embedder = SentenceTransformer(embed_model)
-        embed_dim = self._embedder.get_sentence_embedding_dimension() or 384
+
+        if isinstance(embed_model, EmbeddingService):
+            embed_service = embed_model
+        else:
+            cfg = cozmo_config.load()
+            model_name = embed_model or cfg.get("embedding", {}).get("model", "all-MiniLM-L6-v2")
+            embed_service = EmbeddingService({"embedding": {"model": model_name}})
+        self._embedder = embed_service
 
         def embed(text: str) -> list[float]:
-            return self._embedder.encode(text, normalize_embeddings=True).tolist()
+            return embed_service.encode(text, normalize=True)
+
+        embed_dim = embed_service.dimension
 
         index_dir = Path(persist_dir) if persist_dir else Path.home() / ".cozmo" / "knowledge_index"
         self.store = LanceStore(
@@ -157,7 +168,7 @@ class KnowledgeIndex:
             embed_dim=embed_dim,
         )
         self._indexed_files: dict[str, float] = {}
-        self._reranker = Reranker(rerank_model) if rerank_model else None
+        self._reranker = rerank_model if isinstance(rerank_model, RerankerService) else None
 
     def index_all(self, force: bool = False):
         """Index all knowledge files. Skips files with unchanged mtime."""
